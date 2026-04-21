@@ -1,17 +1,16 @@
-from abc import ABC, abstractmethod
-from typing import Dict, List
+from abc import abstractmethod
+from typing import List
 
 from ev_dispatch.core.network import RoadNetwork
-from ev_dispatch.core.task import Task
-from ev_dispatch.core.vehicle import Vehicle
+from ev_dispatch.core.interfaces import AbstractDispatcher, SimulationState, Action
 
 
-class Dispatcher(ABC):
+class Dispatcher(AbstractDispatcher):
     """Dispatcher interface."""
 
     def __init__(self, network: RoadNetwork):
-        self.network = network
+        super().__init__(network)
 
     @abstractmethod
-    def assign_tasks(self, tasks: List[Task], vehicles: List[Vehicle]) -> Dict[str, List[Task]]:
+    def generate_actions(self, state: SimulationState) -> List[Action]:
         raise NotImplementedError

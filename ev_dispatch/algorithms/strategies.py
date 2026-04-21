@@ -1,20 +1,19 @@
-from collections import defaultdict
-from typing import Dict, List
+from typing import List
 
 from ev_dispatch.algorithms.dispatcher import Dispatcher
-from ev_dispatch.core.task import Task
-from ev_dispatch.core.vehicle import Vehicle
+from ev_dispatch.core.interfaces import Action, SimulationState
 
 
 class DispatcherNearestFirst(Dispatcher):
     """Greedy strategy: assign nearest feasible task first."""
 
-    def assign_tasks(self, tasks: List[Task], vehicles: List[Vehicle]) -> Dict[str, List[Task]]:
-        assignments = defaultdict(list)
-        unassigned_tasks = list(tasks)
+    def generate_actions(self, state: SimulationState) -> List[Action]:
+        actions: List[Action] = []
+        unassigned_tasks = list(state.pending_tasks)
+        planned_loads = {v.id: v.current_load for v in state.vehicles}
         available_vehicles = [
             v
-            for v in vehicles
+            for v in state.vehicles
             if v.current_battery > 10 and v.get_available_capacity() > 0
         ]
 
@@ -24,7 +23,8 @@ class DispatcherNearestFirst(Dispatcher):
 
             for vehicle in available_vehicles:
                 for task in unassigned_tasks:
-                    if vehicle.get_available_capacity() >= task.weight:
+                    available_capacity = vehicle.load_capacity - planned_loads[vehicle.id]
+                    if available_capacity >= task.weight:
                         dist = vehicle.position.distance_to(task.origin)
                         if dist < best_distance:
                             best_distance = dist
@@ -34,29 +34,38 @@ class DispatcherNearestFirst(Dispatcher):
                 break
 
             vehicle, task = best_assignment
-            assignments[vehicle.id].append(task)
+            actions.append(
+                Action(
+                    type="assign_task",
+                    vehicle_id=vehicle.id,
+                    task_id=task.id,
+                    note="nearest_first",
+                )
+            )
             unassigned_tasks.remove(task)
-            vehicle.current_load += task.weight
-            if vehicle.get_available_capacity() <= 0:
+            planned_loads[vehicle.id] += task.weight
+            if (vehicle.load_capacity - planned_loads[vehicle.id]) <= 0:
                 available_vehicles.remove(vehicle)
 
-        return dict(assignments)
+        return actions
 
 
 class DispatcherLargestFirst(Dispatcher):
     """Greedy strategy: assign heavier tasks first."""
 
-    def assign_tasks(self, tasks: List[Task], vehicles: List[Vehicle]) -> Dict[str, List[Task]]:
-        assignments = defaultdict(list)
-        sorted_tasks = sorted(tasks, key=lambda t: t.weight, reverse=True)
+    def generate_actions(self, state: SimulationState) -> List[Action]:
+        actions: List[Action] = []
+        planned_loads = {v.id: v.current_load for v in state.vehicles}
+        sorted_tasks = sorted(state.pending_tasks, key=lambda t: t.weight, reverse=True)
 
         for task in sorted_tasks:
             best_vehicle = None
             best_distance = float("inf")
 
-            for vehicle in vehicles:
+            for vehicle in state.vehicles:
+                available_capacity = vehicle.load_capacity - planned_loads[vehicle.id]
                 if (
-                    vehicle.get_available_capacity() >= task.weight
+                    available_capacity >= task.weight
                     and vehicle.can_reach(task.origin)
                 ):
                     dist = vehicle.position.distance_to(task.origin)
@@ -65,7 +74,14 @@ class DispatcherLargestFirst(Dispatcher):
                         best_vehicle = vehicle
 
             if best_vehicle is not None:
-                assignments[best_vehicle.id].append(task)
-                best_vehicle.current_load += task.weight
+                actions.append(
+                    Action(
+                        type="assign_task",
+                        vehicle_id=best_vehicle.id,
+                        task_id=task.id,
+                        note="largest_first",
+                    )
+                )
+                planned_loads[best_vehicle.id] += task.weight
 
-        return dict(assignments)
+        return actions

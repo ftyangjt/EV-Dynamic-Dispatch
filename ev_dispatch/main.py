@@ -12,6 +12,7 @@ if __package__ is None or __package__ == "":
 from ev_dispatch.algorithms.strategies import DispatcherLargestFirst, DispatcherNearestFirst
 from ev_dispatch.scenarios.default import build_default_scenario
 from ev_dispatch.simulator.simulator import Simulator
+from ev_dispatch.visualization.console import print_run_summary
 
 
 def run_demo() -> None:
@@ -33,9 +34,7 @@ def run_demo() -> None:
         dispatcher=DispatcherNearestFirst(network),
     )
     results1 = sim1.run_simulation(num_steps=10, tasks_per_step=3)
-    print(f"完成任务: {results1['completed']}")
-    print(f"失败任务: {results1['failed']}")
-    print(f"总评分: {results1['total_score']:.2f}")
+    print_run_summary("策略1结果", results1, sim1.get_frames())
 
     print("\n[策略2] 最大任务优先调度")
     sim2 = Simulator(
@@ -45,9 +44,7 @@ def run_demo() -> None:
         dispatcher=DispatcherLargestFirst(network),
     )
     results2 = sim2.run_simulation(num_steps=10, tasks_per_step=3)
-    print(f"完成任务: {results2['completed']}")
-    print(f"失败任务: {results2['failed']}")
-    print(f"总评分: {results2['total_score']:.2f}")
+    print_run_summary("策略2结果", results2, sim2.get_frames())
 
     print("\n[对比分析]")
     diff = results1["total_score"] - results2["total_score"]
