@@ -25,7 +25,7 @@ class DispatcherNearestFirst(Dispatcher):
                 for task in unassigned_tasks:
                     available_capacity = vehicle.load_capacity - planned_loads[vehicle.id]
                     if available_capacity >= task.weight:
-                        dist = vehicle.position.distance_to(task.origin)
+                        dist = state.network.shortest_distance(vehicle.position, task.origin)
                         if dist < best_distance:
                             best_distance = dist
                             best_assignment = (vehicle, task)
@@ -66,9 +66,9 @@ class DispatcherLargestFirst(Dispatcher):
                 available_capacity = vehicle.load_capacity - planned_loads[vehicle.id]
                 if (
                     available_capacity >= task.weight
-                    and vehicle.can_reach(task.origin)
+                    and vehicle.can_reach(task.origin, network=state.network)
                 ):
-                    dist = vehicle.position.distance_to(task.origin)
+                    dist = state.network.shortest_distance(vehicle.position, task.origin)
                     if dist < best_distance:
                         best_distance = dist
                         best_vehicle = vehicle

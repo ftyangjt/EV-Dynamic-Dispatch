@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 from ev_dispatch.core.location import Location
+from ev_dispatch.core.network import RoadNetwork
 
 
 @dataclass
@@ -17,8 +18,13 @@ class Vehicle:
     efficiency: float = 0.15
     current_tasks: List[str] = field(default_factory=list)
 
-    def can_reach(self, location: Location, reserve_energy: float = 5.0) -> bool:
-        dist = self.position.distance_to(location)
+    def can_reach(
+        self,
+        location: Location,
+        reserve_energy: float = 5.0,
+        network: Optional[RoadNetwork] = None,
+    ) -> bool:
+        dist = network.shortest_distance(self.position, location) if network else self.position.distance_to(location)
         energy_needed = dist * self.efficiency
         return self.current_battery >= (energy_needed + reserve_energy)
 

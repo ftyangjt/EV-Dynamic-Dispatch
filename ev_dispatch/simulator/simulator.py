@@ -75,19 +75,31 @@ class Simulator:
     ) -> Dict[str, float]:
         score_delta = 0.0
         distance_delta = 0.0
+        time_delta_hours = 0.0
 
         vehicle = next((v for v in self.vehicles if v.id == action.vehicle_id), None)
         if vehicle is None:
-            return {"distance": 0.0, "score": 0.0}
+            return {"distance": 0.0, "score": 0.0, "time_hours": 0.0}
 
         if action.type != "assign_task" or action.task_id is None:
-            return {"distance": 0.0, "score": 0.0}
+            return {"distance": 0.0, "score": 0.0, "time_hours": 0.0}
 
         task = task_map.get(action.task_id)
         if task is None or task.completed:
-            return {"distance": 0.0, "score": 0.0}
+            return {"distance": 0.0, "score": 0.0, "time_hours": 0.0}
 
-        dist = vehicle.position.distance_to(task.origin) + task.get_delivery_distance()
+        # 路网距离与行驶时间（拥堵随当前时刻变化）
+        depart_time = self.current_time
+        dist_to_pickup = self.network.shortest_distance(vehicle.position, task.origin, method="dijkstra")
+        t_to_pickup = self.network.shortest_travel_time_hours(vehicle.position, task.origin, start_time=depart_time)
+
+        # 近似：到达取货点后的时间 = depart_time + t_to_pickup（拥堵按到达时刻重新取一片）
+        arrive_pickup_time = depart_time + timedelta(hours=t_to_pickup)
+        dist_delivery = self.network.shortest_distance(task.origin, task.destination, method="dijkstra")
+        t_delivery = self.network.shortest_travel_time_hours(task.origin, task.destination, start_time=arrive_pickup_time)
+
+        dist = dist_to_pickup + dist_delivery
+        time_delta_hours = t_to_pickup + t_delivery
         energy_used = EnergyManager.calculate_consumption(dist, task.weight)
         distance_delta += dist
 
@@ -96,15 +108,17 @@ class Simulator:
             vehicle.position = task.destination
             task.completed = True
             self.completed_tasks.append(task)
-            score_delta += 100 - (dist * 0.1)
+            # 简单收益：路程越短越好 + 时间越短越好
+            score_delta += 100 - (dist * 0.1) - (time_delta_hours * 2.0)
         else:
             self.failed_tasks.append(task)
             score_delta -= 50
 
-        return {"distance": distance_delta, "score": score_delta}
+        return {"distance": distance_delta, "score": score_delta, "time_hours": time_delta_hours}
 
     def run_simulation(self, num_steps: int = 100, tasks_per_step: int = 3) -> Dict[str, float]:
         total_distance = 0.0
+        total_time_hours = 0.0
         total_score = 0.0
 
         for step in range(num_steps):
@@ -124,6 +138,7 @@ class Simulator:
             for action in actions:
                 delta = self._execute_action(action, task_map)
                 total_distance += delta["distance"]
+                total_time_hours += delta["time_hours"]
                 total_score += delta["score"]
 
             self.current_time += timedelta(hours=1)
@@ -139,6 +154,7 @@ class Simulator:
             "completed": len(self.completed_tasks),
             "failed": len(self.failed_tasks),
             "total_distance": total_distance,
+            "total_time_hours": total_time_hours,
             "total_score": total_score,
             "avg_score_per_task": total_score / (len(self.completed_tasks) + 1),
         }

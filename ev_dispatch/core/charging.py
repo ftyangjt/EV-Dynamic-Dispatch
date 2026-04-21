@@ -20,3 +20,4 @@ class ChargingStation:
 
     def get_charge_time(self, energy_needed: float) -> float:
         return float((energy_needed / self.charging_power) * 60)
+    
