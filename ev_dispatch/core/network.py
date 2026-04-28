@@ -152,6 +152,7 @@ class RoadNetwork:
         start: Location,
         end: Location,
         start_time: datetime,
+        vehicle_max_speed_kmh: Optional[float] = None,
     ) -> float:
         """
         计算在给定出发时刻的最短行驶时间（小时）。
@@ -164,21 +165,30 @@ class RoadNetwork:
 
         if start_node is None or end_node is None:
             dist = start.distance_to(end)
-            return dist / 40.0  # fallback 40 km/h
+            fallback_speed = 40.0
+            if vehicle_max_speed_kmh is not None:
+                fallback_speed = min(fallback_speed, float(vehicle_max_speed_kmh))
+            return dist / max(1e-6, fallback_speed)
 
         def time_weight(u: str, v: str, attrs: dict) -> float:
             length_km = float(attrs.get("length_km", 0.0))
             speed_limit = float(attrs.get("speed_limit_kmph", 40.0))
             peak_intensity = float(attrs.get("peak_intensity", 0.5))
             m = self.congestion_model.multiplier(start_time, peak_intensity)
-            speed = max(1e-6, speed_limit * m)
+            speed = speed_limit * m
+            if vehicle_max_speed_kmh is not None:
+                speed = min(speed, float(vehicle_max_speed_kmh))
+            speed = max(1e-6, speed)
             return length_km / speed  # hours
 
         try:
             return float(nx.dijkstra_path_length(self.graph, start_node, end_node, weight=time_weight))
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             dist = start.distance_to(end)
-            return dist / 40.0
+            fallback_speed = 40.0
+            if vehicle_max_speed_kmh is not None:
+                fallback_speed = min(fallback_speed, float(vehicle_max_speed_kmh))
+            return dist / max(1e-6, fallback_speed)
     
     def _find_nearest_node(self, location: Location) -> Optional[str]:
         """

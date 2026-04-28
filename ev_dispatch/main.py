@@ -32,6 +32,8 @@ def run_demo() -> None:
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=DispatcherNearestFirst(network),
+        random_seed=42,
+        debug_run_id="pre",
     )
     results1 = sim1.run_simulation(num_steps=10, tasks_per_step=3)
     print_run_summary("策略1结果", results1, sim1.get_frames())
@@ -42,6 +44,8 @@ def run_demo() -> None:
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=DispatcherLargestFirst(network),
+        random_seed=42,
+        debug_run_id="pre",
     )
     results2 = sim2.run_simulation(num_steps=10, tasks_per_step=3)
     print_run_summary("策略2结果", results2, sim2.get_frames())

@@ -11,11 +11,34 @@ class EnergyManager:
     def calculate_consumption(
         distance: float,
         load: float,
+        speed_kmh: float = 40.0,
         efficiency: float = 0.15,
         weather_factor: float = 1.0,
     ) -> float:
-        load_factor = 1.0 + load / 10000
-        return float(distance * efficiency * load_factor * weather_factor)
+        """
+        Calculate energy consumption with speed factor.
+        
+        Args:
+            distance: Travel distance (km)
+            load: Cargo weight (kg)
+            speed_kmh: Travel speed (km/h), optimal at 40 km/h
+            efficiency: Base energy consumption (kWh/km)
+            weather_factor: Weather multiplier (1.0 = normal)
+        
+        Returns:
+            Energy needed (kWh)
+        """
+        # Base consumption: distance * efficiency * load_factor * weather
+        load_factor = 1.0 + load / 10000  # +0.01% per kg
+        base = distance * efficiency * load_factor * weather_factor
+        
+        # Speed factor: optimal at 40 km/h
+        # At 40 km/h: factor = 1.0 (100% efficiency)
+        # At 60 km/h: factor ≈ 1.1 (10% increase)
+        # At 20 km/h: factor ≈ 1.1 (10% increase)
+        speed_factor = 1.0 + ((speed_kmh - 40.0) ** 2) / 3200.0
+        
+        return float(base * speed_factor)
 
     @staticmethod
     def find_nearest_charging_station(
