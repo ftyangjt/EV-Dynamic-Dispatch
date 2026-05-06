@@ -69,7 +69,12 @@ class DispatcherNearestFirst(Dispatcher):
         available_vehicles = [
             v
             for v in state.vehicles
-            if v.id not in vehicles_to_charge and v.status == VehicleStatus.IDLE and v.current_battery > 10 and v.get_available_load_capacity() > 0
+            if (
+                v.id not in vehicles_to_charge
+                and v.status == VehicleStatus.IDLE
+                and v.current_battery > v.min_battery_threshold
+                and v.get_available_load_capacity() > 0
+            )
         ]
 
         while unassigned_tasks and available_vehicles:

@@ -43,6 +43,7 @@ class Simulator:
         self.current_time = datetime.now()
         self.completed_tasks: List[Task] = []
         self.failed_tasks: List[Task] = []
+        self.all_tasks: List[Task] = []
         self._completed_task_ids = set()
         self._failed_task_ids = set()
         self.frames: List[SimulationFrame] = []
@@ -377,12 +378,13 @@ class Simulator:
             self._advance_charging_stations()
 
             new_tasks = [self.generate_random_task(self.current_time) for _ in range(tasks_per_step)]
+            self.all_tasks.extend(new_tasks)
             total_generated += len(new_tasks)
-            task_map = {t.id: t for t in new_tasks}
+            task_map = {t.id: t for t in self.all_tasks}
 
             state = SimulationState(
                 current_time=self.current_time,
-                tasks=new_tasks,
+                tasks=self.all_tasks,
                 vehicles=self.vehicles,
                 charging_stations=self.charging_stations,
                 network=self.network,
@@ -399,6 +401,7 @@ class Simulator:
                     "step": step,
                     "generated_tasks": [t.id for t in new_tasks],
                     "generated_cargo_types": {t.id: t.cargo_type for t in new_tasks},
+                    "pending_task_ids": [t.id for t in state.pending_tasks],
                     "actions": [
                         {"type": a.type, "vehicle_id": a.vehicle_id, "task_id": a.task_id, "note": a.note}
                         for a in actions
@@ -416,7 +419,7 @@ class Simulator:
 
             self.current_time += timedelta(hours=1)
 
-            pending = [t for t in new_tasks if not t.completed and t not in self.failed_tasks]
+            pending = [t for t in self.all_tasks if not t.completed and not t.failed]
             self.frames.append(self._build_frame(step=step, pending_tasks=pending))
 
         return {
