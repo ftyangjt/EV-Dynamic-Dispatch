@@ -65,7 +65,8 @@ class RoadNetwork:
                 node_i, loc_i = self.nodes[i]
                 node_j, loc_j = self.nodes[j]
                 dist = loc_i.distance_to(loc_j)
-                if dist < width / (2 * grid_size):
+                max_grid_dist = max(width, height) / grid_size
+                if dist <= max_grid_dist *1.1:
                     # Edge attributes:
                     # - length_km: distance in the same units as coordinates (treated as km)
                     # - speed_limit_kmph: speed limit per road segment

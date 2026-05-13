@@ -52,7 +52,7 @@ def _run_single_strategy(
     num_steps: int,
     tasks_per_step: int,
     scenario_name: str,
-) -> Tuple[Dict[str, float], List[SimulationFrame], object]:
+) -> Tuple[Dict[str, float], List[SimulationFrame], object, List[object]]:
     cfg = SCENARIO_PRESETS[scenario_name]
     network, vehicles, charging_stations = build_default_scenario(**cfg)
 
@@ -68,7 +68,7 @@ def _run_single_strategy(
         dispatcher=dispatcher,
     )
     results = sim.run_simulation(num_steps=num_steps, tasks_per_step=tasks_per_step)
-    return results, sim.get_frames(), network
+    return results, sim.get_frames(), network, charging_stations
 
 
 def _build_timeline(frames: List[SimulationFrame]) -> Dict[str, List[float]]:
@@ -95,7 +95,7 @@ def _build_timeline(frames: List[SimulationFrame]) -> Dict[str, List[float]]:
     }
 
 
-def _render_snapshot(network: object, frame: SimulationFrame, panel_title: str) -> None:
+def _render_snapshot(network: object, frame: SimulationFrame, stations: List[object], panel_title: str) -> None:
     fig, ax = plt.subplots(figsize=(7.5, 5.2))
     ax.set_title(panel_title)
 
@@ -103,11 +103,18 @@ def _render_snapshot(network: object, frame: SimulationFrame, panel_title: str) 
     for n1, n2 in network.graph.edges():
         x1, y1 = node_xy[n1]
         x2, y2 = node_xy[n2]
-        ax.plot([x1, x2], [y1, y2], color="#d0d7de", linewidth=0.8, alpha=0.8, zorder=1)
+        ax.plot([x1, x2], [y1, y2], color="#6ca7e2", linewidth=0.8, alpha=0.8, zorder=4)
 
     xs = [loc.x for _, loc in network.nodes]
     ys = [loc.y for _, loc in network.nodes]
     ax.scatter(xs, ys, s=12, color="#8b949e", alpha=0.7, zorder=2)
+
+    # 绘制充电站
+    sx = [s.position.x for s in stations]
+    sy = [s.position.y for s in stations]
+    ax.scatter(sx, sy, s=180, marker="^", color="gold", edgecolors="blue", linewidths=1.5, zorder=5, label="Charging Station")
+    for s in stations:
+        ax.text(s.position.x + 0.2, s.position.y + 0.2, s.id, fontsize=8, fontweight="bold", color="blue")
 
     vehicle_ids = list(frame.vehicle_positions.keys())
     vx = [frame.vehicle_positions[vid][0] for vid in vehicle_ids]
@@ -167,7 +174,7 @@ def main() -> None:
 
         with st.spinner("正在运行仿真并生成图表..."):
             if algo_mode in ("仅最近优先", "双策略对比"):
-                n_results, n_frames, n_network = _run_single_strategy(
+                n_results, n_frames, n_network, n_stations = _run_single_strategy(
                     "nearest",
                     num_steps=num_steps,
                     tasks_per_step=tasks_per_step,
@@ -177,11 +184,12 @@ def main() -> None:
                     "results": n_results,
                     "frames": n_frames,
                     "network": n_network,
+                    "stations": n_stations,
                     "timeline": _build_timeline(n_frames),
                 }
 
             if algo_mode in ("仅最大优先", "双策略对比"):
-                l_results, l_frames, l_network = _run_single_strategy(
+                l_results, l_frames, l_network, l_stations = _run_single_strategy(
                     "largest",
                     num_steps=num_steps,
                     tasks_per_step=tasks_per_step,
@@ -191,6 +199,7 @@ def main() -> None:
                     "results": l_results,
                     "frames": l_frames,
                     "network": l_network,
+                    "stations": l_stations,
                     "timeline": _build_timeline(l_frames),
                 }
 
@@ -240,7 +249,7 @@ def main() -> None:
             name: [data["results"]["total_score"]]
             for name, data in runs.items()
         }
-        st.bar_chart(compare_scores)
+        st.bar_chart(compare_scores, stack=False)
 
     with compare_right:
         st.markdown("#### 任务完成/失败对比")
@@ -250,21 +259,63 @@ def main() -> None:
         }
         for name, data in runs.items():
             compare_task_counts[f"{name}_failed"] = [data["results"]["failed"]]
-        st.bar_chart(compare_task_counts)
+        st.bar_chart(compare_task_counts, stack=False)
 
     st.subheader("路网快照面板")
-    selected_strategy = st.selectbox("选择轨迹", list(runs.keys()))
+    playback_cols = st.columns([1.4, 1, 1, 1])
+    with playback_cols[0]:
+        selected_strategy = st.selectbox("选择轨迹", list(runs.keys()), key="playback_strategy")
+    with playback_cols[1]:
+        autoplay_enabled = st.checkbox("自动播放轨迹", value=st.session_state.get("autoplay_enabled", False), key="autoplay_enabled")
+    with playback_cols[2]:
+        loop_enabled = st.checkbox("循环播放", value=st.session_state.get("loop_enabled", True), key="loop_enabled")
+    with playback_cols[3]:
+        play_interval_ms = st.slider("播放间隔(ms)", min_value=100, max_value=2000, value=int(st.session_state.get("play_interval_ms", 500)), step=100, key="play_interval_ms")
+
+    if st.button("重置轨迹进度", use_container_width=True):
+        st.session_state[f"playback_step_{selected_strategy}"] = 0
+
     selected_data = runs[selected_strategy]
     selected_frames: List[SimulationFrame] = selected_data["frames"]
     if selected_frames:
-        max_step = len(selected_frames) - 1
-        step_idx = st.slider("查看 step", min_value=0, max_value=max_step, value=0)
-        frame = selected_frames[step_idx]
-        _render_snapshot(
-            selected_data["network"],
-            frame,
-            panel_title=f"{selected_strategy} @ step={frame.step}",
-        )
+        step_key = f"playback_step_{selected_strategy}"
+        if step_key not in st.session_state:
+            st.session_state[step_key] = 0
+        st.session_state[step_key] = min(st.session_state[step_key], len(selected_frames) - 1)
+
+        render_interval = (play_interval_ms / 1000.0) if autoplay_enabled else None
+
+        @st.fragment(run_every=render_interval)
+        def playback_fragment() -> None:
+            if autoplay_enabled and len(selected_frames) > 1:
+                next_step = int(st.session_state.get(step_key, 0)) + 1
+                if next_step >= len(selected_frames):
+                    if loop_enabled:
+                        next_step = 0
+                    else:
+                        next_step = len(selected_frames) - 1
+                        st.session_state.autoplay_enabled = False
+                st.session_state[step_key] = next_step
+                current_step = next_step
+
+            max_step = len(selected_frames) - 1
+            step_idx = st.slider("查看 step", min_value=0, max_value=max_step, key=step_key)
+            frame = selected_frames[step_idx]
+            status_left, status_right = st.columns(2)
+            with status_left:
+                st.metric("当前 step", frame.step)
+                st.metric("待处理任务", len(frame.pending_task_ids))
+            with status_right:
+                st.metric("已完成任务", len(frame.completed_task_ids))
+                st.metric("失败任务", len(frame.failed_task_ids))
+            _render_snapshot(
+                selected_data["network"],
+                frame,
+                selected_data.get("stations", []),
+                panel_title=f"{selected_strategy} @ step={frame.step}",
+            )
+
+        playback_fragment()
 
 
 if __name__ == "__main__":
