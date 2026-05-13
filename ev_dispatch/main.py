@@ -54,6 +54,8 @@ def run_demo(
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=DispatcherNearestFirst(network),
+        random_seed=42,
+        debug_run_id="pre",
     )
     results1, frames1 = _run_strategy(
         "策略1结果",
@@ -68,6 +70,8 @@ def run_demo(
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=DispatcherLargestFirst(network),
+        random_seed=42,
+        debug_run_id="pre",
     )
     results2, frames2 = _run_strategy(
         "策略2结果",
