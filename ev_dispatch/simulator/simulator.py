@@ -74,30 +74,45 @@ class Simulator:
         - TYPE_2: 专用货物（仅Compact车），占比 10%
         - TYPE_3: 专用货物（仅Standard车），占比 10%
         - TYPE_4: 专用货物（仅Large车），占比 10%
+        
+        所有任务的 origin/destination 都必须是网络节点！
         """
         task_id = f"task_{self._task_seq}"
         self._task_seq += 1
-        origin = Location(
-            float(self.rng.uniform(0, self.network.width)),
-            float(self.rng.uniform(0, self.network.height)),
-            f"origin_{task_id}",
-        )
-        destination = Location(
-            float(self.rng.uniform(0, self.network.width)),
-            float(self.rng.uniform(0, self.network.height)),
-            f"dest_{task_id}",
-        )
+        
+        # 从网络节点中随机选择起点和终点
+        num_nodes = len(self.network.nodes)
+        origin_idx = int(self.rng.integers(0, num_nodes))
+        destination_idx = int(self.rng.integers(0, num_nodes))
+        
+        # 确保起点和终点不同
+        while destination_idx == origin_idx and num_nodes > 1:
+            destination_idx = int(self.rng.integers(0, num_nodes))
+        
+        origin_node_id, origin_location = self.network.nodes[origin_idx]
+        dest_node_id, dest_location = self.network.nodes[destination_idx]
+        
+        origin = origin_location
+        destination = dest_location
+        
         weight = float(self.rng.uniform(10, 500))
         volume = float(self.rng.uniform(0.1, 3.0))  # m^3，随机体积
         deadline = current_time + timedelta(hours=float(self.rng.uniform(1, 8)))
         
-        # 按比例生成货物类型
+        # 按比例生成货物类型 - 转换为 CargoType enum
         cargo_distribution = self.cargo_config.get_cargo_type_distribution()
         cargo_type_str = self.rng.choice(
             list(cargo_distribution.keys()),
             p=list(cargo_distribution.values())
         )
-        cargo_type = str(cargo_type_str)
+        # 将字符串映射到 CargoType enum
+        cargo_type_map = {
+            "type_1": CargoType.TYPE_1,
+            "type_2": CargoType.TYPE_2,
+            "type_3": CargoType.TYPE_3,
+            "type_4": CargoType.TYPE_4,
+        }
+        cargo_type = cargo_type_map.get(cargo_type_str, CargoType.TYPE_1)
 
         # #region agent log
         self._dbg(
@@ -106,12 +121,14 @@ class Simulator:
             "generated_task",
             {
                 "task_id": task_id,
-                "cargo_type": cargo_type,
+                "cargo_type": cargo_type.value,
                 "weight": weight,
                 "volume": volume,
                 "created_time": current_time.isoformat(),
                 "deadline": deadline.isoformat(),
                 "seed": self.random_seed,
+                "origin_node": origin_node_id,
+                "dest_node": dest_node_id,
             },
         )
         # #endregion

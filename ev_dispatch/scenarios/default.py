@@ -77,12 +77,18 @@ def build_default_scenario(
     num_stations: int = 3,
     vehicle_mix: Dict[str, int] = None,
 ) -> Tuple[RoadNetwork, List[Vehicle], List[ChargingStation]]:
-    """Build a default city dispatch scenario."""
+    """Build a default city dispatch scenario.
+    
+    所有车辆和充电站必须放在网络节点上！
+    """
     network = RoadNetwork(width=width, height=height, num_nodes=num_nodes)
 
     if vehicle_mix is None:
         vehicle_mix = {"compact": 1, "standard": 3, "large": 1}
 
+    # 所有车辆从第一个网络节点出发（depot）
+    depot_node_id, depot_location = network.nodes[0]
+    
     vehicles: List[Vehicle] = []
     vehicle_index = 0
     for vehicle_type_name, count in vehicle_mix.items():
@@ -93,7 +99,7 @@ def build_default_scenario(
             vehicles.append(
                 Vehicle(
                     id=f"vehicle_{vehicle_index}",
-                    position=Location(width / 2, height / 2, "depot"),
+                    position=depot_location,  # 使用网络节点的位置
                     vehicle_type=vehicle_type,
                 )
             )
@@ -103,26 +109,32 @@ def build_default_scenario(
         vehicles.append(
             Vehicle(
                 id=f"vehicle_{len(vehicles)}",
-                position=Location(width / 2, height / 2, "depot"),
+                position=depot_location,  # 使用网络节点的位置
                 vehicle_type=VEHICLE_TYPES["standard"],
             )
         )
 
+    # 充电站分散放在网络的不同节点上
+    # 选择均匀分布的节点位置
+    num_network_nodes = len(network.nodes)
     station_profiles = [
         {"num_chargers": 4, "charging_power": 120.0},
         {"num_chargers": 3, "charging_power": 90.0},
         {"num_chargers": 2, "charging_power": 60.0},
     ]
     charging_stations: List[ChargingStation] = []
-    for i in range(num_stations):
+    for i in range(min(num_stations, num_network_nodes)):
         profile = station_profiles[i % len(station_profiles)]
+        # 均匀分布：从第1个节点开始，每隔 num_network_nodes/num_stations 个节点选一个
+        node_idx = int((i + 1) * (num_network_nodes / (num_stations + 1)))
+        node_idx = min(node_idx, num_network_nodes - 1)
+        
+        station_node_id, station_location = network.nodes[node_idx]
+        
         charging_stations.append(
             ChargingStation(
                 id=f"station_{i}",
-                position=Location(
-                    (i + 1) * (width / (num_stations + 1)),
-                    (i + 1) * (height / (num_stations + 1)),
-                ),
+                position=station_location,  # 使用网络节点的位置
                 num_chargers=int(profile["num_chargers"]),
                 charging_power=float(profile["charging_power"]),
             )

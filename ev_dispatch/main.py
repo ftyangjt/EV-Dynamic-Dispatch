@@ -13,7 +13,7 @@ if __package__ is None or __package__ == "":
 
 from ev_dispatch.algorithms.strategies import DispatcherLargestFirst, DispatcherNearestFirst
 from ev_dispatch.core.interfaces import SimulationFrame
-from ev_dispatch.scenarios.default import build_default_scenario
+from ev_dispatch.scenarios.default import build_default_scenario, CargoConfig
 from ev_dispatch.simulator.simulator import Simulator
 from ev_dispatch.visualization.console import print_run_summary
 
@@ -47,6 +47,9 @@ def run_demo(
     print("\n[初始化] 创建场景...")
     print(f"车队规模: {len(vehicles)} 辆车")
     print(f"充电站数: {len(charging_stations)} 个")
+    
+    # 创建货物类型配置
+    cargo_config = CargoConfig(num_types=4, type_1_ratio=0.7)
 
     print("\n[策略1] 最近任务优先调度")
     sim1 = Simulator(
@@ -54,6 +57,7 @@ def run_demo(
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=DispatcherNearestFirst(network),
+        cargo_config=cargo_config,
         random_seed=42,
         debug_run_id="pre",
     )
@@ -70,6 +74,7 @@ def run_demo(
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=DispatcherLargestFirst(network),
+        cargo_config=cargo_config,
         random_seed=42,
         debug_run_id="pre",
     )
