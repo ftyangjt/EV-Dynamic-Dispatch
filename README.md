@@ -135,9 +135,28 @@ pip install numpy scipy matplotlib networkx
 python quick_start.py
 # 或
 python -m ev_dispatch.main
+
+# 启用 Matplotlib 动画（首版）
+python -m ev_dispatch.main --visualize --steps 20 --tasks-per-step 3
+
+# 导出动画（GIF/MP4）
+python -m ev_dispatch.main --visualize --save-animation outputs/demo.gif --no-show
+
+# Streamlit 第二阶段仪表盘
+streamlit run ev_dispatch/visualization/streamlit_dashboard.py
 ```
 
 示例将输出两种策略在同一仿真设置下的完成任务数和评分对比。
+
+Matplotlib 首版说明：
+- 动画数据来源于 `Simulator.get_frames()` 的 `SimulationFrame` 序列。
+- 支持展示路网、车辆位置、车辆电量颜色、每步 pending/completed/failed 计数。
+- `--visualize-strategy` 可选 `nearest` 或 `largest`，用于指定播放哪条策略轨迹。
+
+Streamlit 第二阶段说明：
+- 提供场景规模选择（小/中/大）、算法选择（最近/最大/双策略）、一键运行。
+- 图表面板包括：任务状态趋势、平均电量趋势、策略总评分对比、完成/失败对比。
+- 提供按 step 查看的路网快照面板，复用现有 `SimulationFrame` 数据流。
 
 ## 9. 实验与报告建议
 

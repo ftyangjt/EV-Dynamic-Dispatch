@@ -1,2 +1,4 @@
-numpy>=1.24
+numpy>=1.24,<2
 networkx>=3.0
+matplotlib>=3.7
+streamlit>=1.35
