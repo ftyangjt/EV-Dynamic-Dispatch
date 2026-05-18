@@ -67,6 +67,7 @@ class Vehicle:
     # Task status
     status: VehicleStatus = VehicleStatus.IDLE
     current_tasks: List[str] = field(default_factory=list)
+    available_at: Optional[datetime] = None
 
     # Charging tracking
     is_charging: bool = False

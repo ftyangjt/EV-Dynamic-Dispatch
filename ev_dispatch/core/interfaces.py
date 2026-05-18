@@ -33,7 +33,11 @@ class SimulationState:
         extra_info: Optional[Dict[str, Any]] = None,
     ):
         self.current_time = current_time
-        self.pending_tasks = [t for t in tasks if not t.completed and not t.failed]
+        self.pending_tasks = [
+            t
+            for t in tasks
+            if not t.completed and not t.failed and not t.assigned_vehicles
+        ]
         self.vehicles = vehicles
         self.charging_stations = charging_stations
         self.network = network

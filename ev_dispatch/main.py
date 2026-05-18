@@ -11,7 +11,11 @@ if __package__ is None or __package__ == "":
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
-from ev_dispatch.algorithms.strategies import DispatcherLargestFirst, DispatcherNearestFirst
+from ev_dispatch.algorithms.strategies import (
+    DispatcherCompositeScore,
+    DispatcherLargestFirst,
+    DispatcherNearestFirst,
+)
 from ev_dispatch.core.interfaces import SimulationFrame
 from ev_dispatch.scenarios.default import build_default_scenario, CargoConfig
 from ev_dispatch.simulator.simulator import Simulator
@@ -55,7 +59,7 @@ def run_demo(
     sim1 = Simulator(
         network=network,
         vehicles=deepcopy(vehicles),
-        charging_stations=charging_stations,
+        charging_stations=deepcopy(charging_stations),
         dispatcher=DispatcherNearestFirst(network),
         cargo_config=cargo_config,
         random_seed=42,
@@ -67,12 +71,19 @@ def run_demo(
         num_steps=num_steps,
         tasks_per_step=tasks_per_step,
     )
+    strategy_runs = {
+        "nearest": {
+            "title": "EV Dispatch - Nearest First",
+            "results": results1,
+            "frames": frames1,
+        }
+    }
 
     print("\n[策略2] 最大任务优先调度")
     sim2 = Simulator(
         network=network,
         vehicles=deepcopy(vehicles),
-        charging_stations=charging_stations,
+        charging_stations=deepcopy(charging_stations),
         dispatcher=DispatcherLargestFirst(network),
         cargo_config=cargo_config,
         random_seed=42,
@@ -84,12 +95,39 @@ def run_demo(
         num_steps=num_steps,
         tasks_per_step=tasks_per_step,
     )
+    strategy_runs["largest"] = {
+        "title": "EV Dispatch - Largest First",
+        "results": results2,
+        "frames": frames2,
+    }
+
+    print("\n[策略3] 综合评分调度")
+    sim3 = Simulator(
+        network=network,
+        vehicles=deepcopy(vehicles),
+        charging_stations=deepcopy(charging_stations),
+        dispatcher=DispatcherCompositeScore(network),
+        cargo_config=cargo_config,
+        random_seed=42,
+        debug_run_id="pre",
+    )
+    results3, frames3 = _run_strategy(
+        "策略3结果",
+        sim3,
+        num_steps=num_steps,
+        tasks_per_step=tasks_per_step,
+    )
+    strategy_runs["composite"] = {
+        "title": "EV Dispatch - Composite Score",
+        "results": results3,
+        "frames": frames3,
+    }
 
     print("\n[对比分析]")
-    diff = results1["total_score"] - results2["total_score"]
-    winner = "最近优先" if diff > 0 else "最大优先"
-    print(f"策略1 vs 策略2 - 评分差: {diff:.2f}")
-    print(f"更优策略: {winner}")
+    winner_key, _winner_data = max(strategy_runs.items(), key=lambda item: item[1]["results"]["total_score"])
+    for key, data in strategy_runs.items():
+        print(f"{key}: total_score={data['results']['total_score']:.2f}")
+    print(f"更优策略: {winner_key}")
 
     if visualize:
         if no_show and not save_animation:
@@ -102,12 +140,9 @@ def run_demo(
             print(f"详细信息: {exc}")
             return
 
-        if visualize_strategy == "largest":
-            target_frames = frames2
-            title = "EV Dispatch - Largest First"
-        else:
-            target_frames = frames1
-            title = "EV Dispatch - Nearest First"
+        selected_run = strategy_runs.get(visualize_strategy, strategy_runs["nearest"])
+        target_frames = selected_run["frames"]
+        title = selected_run["title"]
 
         try:
             out_file = play_simulation_frames(
@@ -134,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visualize", action="store_true", help="启用 Matplotlib 动画")
     parser.add_argument(
         "--visualize-strategy",
-        choices=["nearest", "largest"],
+        choices=["nearest", "largest", "composite"],
         default="nearest",
         help="可视化展示的策略轨迹",
     )

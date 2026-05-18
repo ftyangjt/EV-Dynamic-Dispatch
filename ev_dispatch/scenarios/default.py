@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -76,12 +76,13 @@ def build_default_scenario(
     num_vehicles: int = 5,
     num_stations: int = 3,
     vehicle_mix: Dict[str, int] = None,
+    random_seed: Optional[int] = None,
 ) -> Tuple[RoadNetwork, List[Vehicle], List[ChargingStation]]:
     """Build a default city dispatch scenario.
     
     所有车辆和充电站必须放在网络节点上！
     """
-    network = RoadNetwork(width=width, height=height, num_nodes=num_nodes)
+    network = RoadNetwork(width=width, height=height, num_nodes=num_nodes, random_seed=random_seed)
 
     if vehicle_mix is None:
         vehicle_mix = {"compact": 1, "standard": 3, "large": 1}

@@ -48,6 +48,116 @@ class Simulator:
         self._failed_task_ids = set()
         self.frames: List[SimulationFrame] = []
 
+    def _mark_task_failed(self, task: Task, reason: str) -> None:
+        task.failed = True
+        task.failed_time = self.current_time
+        task.failure_reason = reason
+        if task.id not in self._failed_task_ids and task.id not in self._completed_task_ids:
+            self.failed_tasks.append(task)
+            self._failed_task_ids.add(task.id)
+
+    def _mark_task_completed(self, task: Task, completed_time: datetime) -> None:
+        task.completed = True
+        task.completed_time = completed_time
+        task.failed = False
+        task.failure_reason = ""
+        if task.id in self._failed_task_ids:
+            self._failed_task_ids.remove(task.id)
+            self.failed_tasks = [t for t in self.failed_tasks if t.id != task.id]
+        if task.id not in self._completed_task_ids:
+            self.completed_tasks.append(task)
+            self._completed_task_ids.add(task.id)
+
+    def _advance_vehicle_tasks(self) -> Dict[str, float]:
+        distance_delta = 0.0
+        time_delta_hours = 0.0
+        cost_delta = 0.0
+        score_delta = 0.0
+        now = self.current_time
+
+        for vehicle in self.vehicles:
+            if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
+                continue
+            if vehicle.available_at is None or vehicle.available_at > now:
+                continue
+
+            task_ids = list(vehicle.current_tasks)
+            vehicle.current_tasks.clear()
+            vehicle.current_load = 0.0
+            vehicle.current_volume = 0.0
+            vehicle.available_at = None
+            vehicle.status = VehicleStatus.IDLE
+
+            for task_id in task_ids:
+                task = next((t for t in self.all_tasks if t.id == task_id), None)
+                if task is None or task.completed or task.failed:
+                    continue
+                vehicle.position = task.destination
+                self._mark_task_completed(task, completed_time=task.planned_completion_time or now)
+                distance_delta += task.planned_distance
+                time_delta_hours += task.planned_time_hours
+                cost_delta += task.planned_cost
+                score_delta += task.planned_score
+
+        return {
+            "distance": distance_delta,
+            "time_hours": time_delta_hours,
+            "cost": cost_delta,
+            "score": score_delta,
+        }
+
+    def _expire_overdue_tasks(self) -> Dict[str, float]:
+        score_delta = 0.0
+        for task in self.all_tasks:
+            if task.completed or task.failed or task.assigned_vehicles:
+                continue
+            if task.deadline < self.current_time:
+                self._mark_task_failed(task, "deadline_expired")
+                score_delta -= 30.0
+        return {"distance": 0.0, "time_hours": 0.0, "cost": 0.0, "score": score_delta}
+
+    @staticmethod
+    def _interpolate_position(start: Location, end: Location, ratio: float) -> tuple:
+        ratio = max(0.0, min(1.0, ratio))
+        return (
+            start.x + (end.x - start.x) * ratio,
+            start.y + (end.y - start.y) * ratio,
+        )
+
+    def _vehicle_display_position(self, vehicle: Vehicle, display_time: Optional[datetime] = None) -> tuple:
+        if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
+            return (vehicle.position.x, vehicle.position.y)
+        if not vehicle.current_tasks:
+            return (vehicle.position.x, vehicle.position.y)
+
+        task = next((t for t in self.all_tasks if t.id == vehicle.current_tasks[0]), None)
+        if (
+            task is None
+            or task.transport_start_position is None
+            or task.start_transport_time is None
+            or task.planned_completion_time is None
+        ):
+            return (vehicle.position.x, vehicle.position.y)
+
+        now = display_time or self.current_time
+        if now <= task.start_transport_time:
+            return (task.transport_start_position.x, task.transport_start_position.y)
+        if now >= task.planned_completion_time:
+            return (task.destination.x, task.destination.y)
+
+        pickup_time = task.planned_pickup_time or task.start_transport_time
+        if now <= pickup_time and pickup_time > task.start_transport_time:
+            elapsed = (now - task.start_transport_time).total_seconds()
+            duration = (pickup_time - task.start_transport_time).total_seconds()
+            return self._interpolate_position(task.transport_start_position, task.origin, elapsed / duration)
+
+        delivery_start = max(pickup_time, task.start_transport_time)
+        elapsed = (now - delivery_start).total_seconds()
+        duration = (task.planned_completion_time - delivery_start).total_seconds()
+        if duration <= 0:
+            return (task.destination.x, task.destination.y)
+        return self._interpolate_position(task.origin, task.destination, elapsed / duration)
+
     # #region agent log
     def _dbg(self, hypothesisId: str, location: str, message: str, data: dict) -> None:
         try:
@@ -146,11 +256,17 @@ class Simulator:
             priority=1.0,
         )
 
-    def _build_frame(self, step: int, pending_tasks: List[Task]) -> SimulationFrame:
+    def _build_frame(
+        self,
+        step: int,
+        pending_tasks: List[Task],
+        frame_time: Optional[datetime] = None,
+    ) -> SimulationFrame:
+        display_time = frame_time or self.current_time
         return SimulationFrame(
-            current_time=self.current_time,
+            current_time=display_time,
             step=step,
-            vehicle_positions={v.id: (v.position.x, v.position.y) for v in self.vehicles},
+            vehicle_positions={v.id: self._vehicle_display_position(v, display_time) for v in self.vehicles},
             vehicle_battery={v.id: v.current_battery for v in self.vehicles},
             pending_task_ids=[t.id for t in pending_tasks],
             completed_task_ids=[t.id for t in self.completed_tasks],
@@ -273,6 +389,10 @@ class Simulator:
         task = task_map.get(action.task_id)
         if task is None or task.completed or task.failed:
             return {"distance": 0.0, "score": 0.0, "time_hours": 0.0}
+        if task.assigned_vehicles:
+            return {"distance": 0.0, "score": 0.0, "time_hours": 0.0, "cost": 0.0}
+        if vehicle.status != VehicleStatus.IDLE or vehicle.available_at is not None:
+            return {"distance": 0.0, "score": 0.0, "time_hours": 0.0, "cost": 0.0}
 
         # 路网距离与行驶时间（拥堵随当前时刻变化）
         depart_time = self.current_time
@@ -286,6 +406,7 @@ class Simulator:
 
         # 近似：到达取货点后的时间 = depart_time + t_to_pickup（拥堵按到达时刻重新取一片）
         arrive_pickup_time = depart_time + timedelta(hours=t_to_pickup)
+        transport_start_position = Location(vehicle.position.x, vehicle.position.y, vehicle.position.name)
         dist_delivery = self.network.shortest_distance(task.origin, task.destination, method="dijkstra")
         t_delivery = self.network.shortest_travel_time_hours(
             task.origin,
@@ -336,38 +457,125 @@ class Simulator:
         # 检查：车辆是否支持该货物类型
         cargo_type = getattr(task.cargo_type, "value", task.cargo_type)
         if cargo_type not in vehicle.supported_cargo_types:
-            task.failed = True
-            task.failure_reason = "cargo_type_mismatch"
-            if task.id not in self._failed_task_ids and task.id not in self._completed_task_ids:
-                self.failed_tasks.append(task)
-                self._failed_task_ids.add(task.id)
+            self._mark_task_failed(task, "cargo_type_mismatch")
             score_delta -= 50  # 货物类型不匹配，任务失败
-            return {"distance": distance_delta, "score": score_delta, "time_hours": time_delta_hours, "cost": cost_delta}
+            return {"distance": 0.0, "score": score_delta, "time_hours": 0.0, "cost": 0.0}
         
         # 检查：车辆是否有足够的电量和容量
         if energy_used <= vehicle.current_battery and vehicle.can_carry_task(task.weight, task.volume, cargo_type):
             vehicle.current_battery -= energy_used
-            vehicle.position = task.destination
-            task.completed = True
-            task.failed = False
-            task.failure_reason = ""
-            if task.id in self._failed_task_ids:
-                self._failed_task_ids.remove(task.id)
-                self.failed_tasks = [t for t in self.failed_tasks if t.id != task.id]
-            if task.id not in self._completed_task_ids:
-                self.completed_tasks.append(task)
-                self._completed_task_ids.add(task.id)
+            vehicle.current_load += task.weight
+            vehicle.current_volume += task.volume
+            vehicle.current_tasks.append(task.id)
+            vehicle.available_at = depart_time + timedelta(hours=time_delta_hours)
+            vehicle.status = VehicleStatus.EN_ROUTE
+            task.assigned_vehicles.append(vehicle.id)
+            task.start_transport_time = depart_time
+            task.transport_start_position = transport_start_position
+            task.planned_pickup_time = arrive_pickup_time
+            task.planned_completion_time = vehicle.available_at
+            task.planned_distance = distance_delta
+            task.planned_time_hours = time_delta_hours
+            task.planned_cost = cost_delta
             # 简单收益：路程越短越好 + 时间越短越好
             score_delta += 100 - (dist * 0.1) - (time_delta_hours * 2.0) - cost_delta
+            task.planned_score = score_delta
         else:
-            task.failed = True
-            task.failure_reason = "capacity_or_energy_insufficient"
-            if task.id not in self._failed_task_ids and task.id not in self._completed_task_ids:
-                self.failed_tasks.append(task)
-                self._failed_task_ids.add(task.id)
+            self._mark_task_failed(task, "capacity_or_energy_insufficient")
             score_delta -= 50
+            return {"distance": 0.0, "score": score_delta, "time_hours": 0.0, "cost": 0.0}
 
-        return {"distance": distance_delta, "score": score_delta, "time_hours": time_delta_hours, "cost": cost_delta}
+        return {"distance": 0.0, "score": 0.0, "time_hours": 0.0, "cost": 0.0}
+
+    def _build_results(
+        self,
+        total_generated: int,
+        total_distance: float,
+        total_time_hours: float,
+        total_cost: float,
+        total_score: float,
+    ) -> Dict[str, float]:
+        pending_tasks = [
+            t
+            for t in self.all_tasks
+            if not t.completed and not t.failed and not t.assigned_vehicles
+        ]
+        in_progress_tasks = [
+            t
+            for t in self.all_tasks
+            if not t.completed and not t.failed and t.assigned_vehicles
+        ]
+        completed_count = len(self._completed_task_ids)
+        failed_count = len(self._failed_task_ids)
+        finished_count = completed_count + failed_count
+
+        on_time_count = 0
+        total_delay_hours = 0.0
+        completed_service_hours = []
+        for task in self.completed_tasks:
+            if task.completed_time is None:
+                continue
+            if task.completed_time <= task.deadline:
+                on_time_count += 1
+            else:
+                total_delay_hours += (task.completed_time - task.deadline).total_seconds() / 3600.0
+            completed_service_hours.append(
+                (task.completed_time - task.created_time).total_seconds() / 3600.0
+            )
+
+        avg_battery_ratio = 0.0
+        low_battery_vehicle_count = 0
+        charging_vehicle_count = 0
+        avg_load_utilization = 0.0
+        if self.vehicles:
+            battery_ratios = [
+                float(v.current_battery) / max(1e-9, float(v.battery_capacity))
+                for v in self.vehicles
+            ]
+            avg_battery_ratio = float(sum(battery_ratios) / len(battery_ratios))
+            low_battery_vehicle_count = sum(
+                1 for v in self.vehicles if v.current_battery <= v.min_battery_threshold
+            )
+            charging_vehicle_count = sum(1 for v in self.vehicles if v.status == VehicleStatus.CHARGING)
+            avg_load_utilization = float(
+                sum(v.get_utilization_rate() for v in self.vehicles) / len(self.vehicles)
+            )
+
+        station_waits = [s.get_wait_time() for s in self.charging_stations]
+        avg_station_wait_minutes = float(sum(station_waits) / len(station_waits)) if station_waits else 0.0
+        max_station_wait_minutes = float(max(station_waits)) if station_waits else 0.0
+
+        return {
+            "completed": completed_count,
+            "failed": failed_count,
+            "generated": total_generated,
+            "pending": len(pending_tasks),
+            "in_progress": len(in_progress_tasks),
+            "completion_rate": completed_count / max(1, total_generated),
+            "failure_rate": failed_count / max(1, total_generated),
+            "finished_rate": finished_count / max(1, total_generated),
+            "on_time_completed": on_time_count,
+            "on_time_rate": on_time_count / max(1, completed_count),
+            "avg_delay_hours": total_delay_hours / max(1, completed_count),
+            "avg_service_hours": (
+                float(sum(completed_service_hours) / len(completed_service_hours))
+                if completed_service_hours
+                else 0.0
+            ),
+            "total_distance": total_distance,
+            "total_time_hours": total_time_hours,
+            "total_cost": total_cost,
+            "total_score": total_score,
+            "avg_score_per_task": total_score / max(1, completed_count),
+            "distance_per_completed_task": total_distance / max(1, completed_count),
+            "cost_per_completed_task": total_cost / max(1, completed_count),
+            "avg_battery_ratio": avg_battery_ratio,
+            "low_battery_vehicle_count": low_battery_vehicle_count,
+            "charging_vehicle_count": charging_vehicle_count,
+            "avg_load_utilization": avg_load_utilization,
+            "avg_station_wait_minutes": avg_station_wait_minutes,
+            "max_station_wait_minutes": max_station_wait_minutes,
+        }
 
     def run_simulation(self, num_steps: int = 100, tasks_per_step: int = 3) -> Dict[str, float]:
         total_distance = 0.0
@@ -393,6 +601,11 @@ class Simulator:
         for step in range(num_steps):
             # 先推进充电队列/完成充电，再生成任务与调度
             self._advance_charging_stations()
+            for delta in (self._advance_vehicle_tasks(), self._expire_overdue_tasks()):
+                total_distance += delta["distance"]
+                total_time_hours += delta["time_hours"]
+                total_score += delta["score"]
+                total_cost += delta.get("cost", 0.0)
 
             new_tasks = [self.generate_random_task(self.current_time) for _ in range(tasks_per_step)]
             self.all_tasks.extend(new_tasks)
@@ -434,22 +647,42 @@ class Simulator:
                 total_score += delta["score"]
                 total_cost += delta.get("cost", 0.0)
 
-            self.current_time += timedelta(hours=1)
+            pending = [
+                t
+                for t in self.all_tasks
+                if not t.completed and not t.failed and not t.assigned_vehicles
+            ]
+            for substep in range(1, 4):
+                frame_time = self.current_time + timedelta(hours=substep / 4)
+                self.frames.append(
+                    self._build_frame(
+                        step=step,
+                        pending_tasks=pending,
+                        frame_time=frame_time,
+                    )
+                )
 
-            pending = [t for t in self.all_tasks if not t.completed and not t.failed]
+            self.current_time += timedelta(hours=1)
+            for delta in (self._advance_vehicle_tasks(), self._expire_overdue_tasks()):
+                total_distance += delta["distance"]
+                total_time_hours += delta["time_hours"]
+                total_score += delta["score"]
+                total_cost += delta.get("cost", 0.0)
+
+            pending = [
+                t
+                for t in self.all_tasks
+                if not t.completed and not t.failed and not t.assigned_vehicles
+            ]
             self.frames.append(self._build_frame(step=step, pending_tasks=pending))
 
-        return {
-            # 用“任务唯一ID”计数，避免同一任务被重复计入失败/完成
-            "completed": len(self._completed_task_ids),
-            "failed": len(self._failed_task_ids),
-            "generated": total_generated,
-            "total_distance": total_distance,
-            "total_time_hours": total_time_hours,
-            "total_cost": total_cost,
-            "total_score": total_score,
-            "avg_score_per_task": total_score / (max(1, len(self._completed_task_ids))),
-        }
+        return self._build_results(
+            total_generated=total_generated,
+            total_distance=total_distance,
+            total_time_hours=total_time_hours,
+            total_cost=total_cost,
+            total_score=total_score,
+        )
 
     def get_frames(self) -> List[SimulationFrame]:
         """可视化模块读取全量轨迹帧。"""

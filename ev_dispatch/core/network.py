@@ -44,12 +44,21 @@ class CongestionModel:
 class RoadNetwork:
     """City road network represented by an undirected graph."""
 
-    def __init__(self, width: float = 20.0, height: float = 20.0, num_nodes: int = 25):
+    def __init__(
+        self,
+        width: float = 20.0,
+        height: float = 20.0,
+        num_nodes: int = 25,
+        random_seed: Optional[int] = None,
+        rng: Optional[np.random.Generator] = None,
+    ):
         self.width = width
         self.height = height
         self.graph = nx.Graph()
         self.nodes = []
         self.congestion_model = CongestionModel()
+        self.random_seed = random_seed
+        self.rng = rng or np.random.default_rng(random_seed)
 
         grid_size = int(np.sqrt(num_nodes))
         for i in range(grid_size):
@@ -71,8 +80,8 @@ class RoadNetwork:
                     # - length_km: distance in the same units as coordinates (treated as km)
                     # - speed_limit_kmph: speed limit per road segment
                     # - peak_intensity: how much this edge is affected by rush hours
-                    speed_limit = float(np.random.uniform(30.0, 60.0))
-                    peak_intensity = float(np.random.uniform(0.2, 1.0))
+                    speed_limit = float(self.rng.uniform(30.0, 60.0))
+                    peak_intensity = float(self.rng.uniform(0.2, 1.0))
                     self.graph.add_edge(
                         node_i,
                         node_j,

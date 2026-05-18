@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 from ev_dispatch.core.charging import ChargingStation
 from ev_dispatch.core.network import RoadNetwork
@@ -96,6 +96,7 @@ def get_city_scale_config(scale: CityScaleName) -> CityScaleConfig:
 
 def build_city_scale_scenario(
     scale: CityScaleName,
+    random_seed: Optional[int] = None,
 ) -> Tuple[RoadNetwork, List[Vehicle], List[ChargingStation], CityScaleConfig]:
     cfg = get_city_scale_config(scale)
     network, vehicles, charging_stations = build_default_scenario(
@@ -105,5 +106,6 @@ def build_city_scale_scenario(
         num_vehicles=cfg.num_vehicles,
         num_stations=cfg.num_stations,
         vehicle_mix=cfg.vehicle_mix,
+        random_seed=random_seed,
     )
     return network, vehicles, charging_stations, cfg

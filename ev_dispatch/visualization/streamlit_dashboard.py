@@ -16,9 +16,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 
-from ev_dispatch.algorithms.strategies import DispatcherLargestFirst, DispatcherNearestFirst
+from ev_dispatch.algorithms.strategies import (
+    COMPOSITE_CONFIG_PRESETS,
+    DispatcherCompositeScore,
+    DispatcherLargestFirst,
+    DispatcherNearestFirst,
+)
 from ev_dispatch.core.interfaces import SimulationFrame
-from ev_dispatch.scenarios.default import build_default_scenario
+from ev_dispatch.scenarios.default import CargoConfig, build_default_scenario
 from ev_dispatch.simulator.simulator import Simulator
 
 
@@ -52,12 +57,22 @@ def _run_single_strategy(
     num_steps: int,
     tasks_per_step: int,
     scenario_name: str,
+    random_seed: int,
+    composite_preset: str = "balanced",
 ) -> Tuple[Dict[str, float], List[SimulationFrame], object, List[object]]:
     cfg = SCENARIO_PRESETS[scenario_name]
-    network, vehicles, charging_stations = build_default_scenario(**cfg)
+    network, vehicles, charging_stations = build_default_scenario(
+        **cfg,
+        random_seed=random_seed,
+    )
 
     if strategy_name == "largest":
         dispatcher = DispatcherLargestFirst(network)
+    elif strategy_name == "composite":
+        dispatcher = DispatcherCompositeScore(
+            network,
+            config=COMPOSITE_CONFIG_PRESETS[composite_preset],
+        )
     else:
         dispatcher = DispatcherNearestFirst(network)
 
@@ -66,6 +81,9 @@ def _run_single_strategy(
         vehicles=deepcopy(vehicles),
         charging_stations=charging_stations,
         dispatcher=dispatcher,
+        cargo_config=CargoConfig(num_types=4, type_1_ratio=0.7),
+        random_seed=random_seed,
+        debug_run_id=f"streamlit-{strategy_name}-{random_seed}",
     )
     results = sim.run_simulation(num_steps=num_steps, tasks_per_step=tasks_per_step)
     return results, sim.get_frames(), network, charging_stations
@@ -156,12 +174,17 @@ def main() -> None:
         scenario_name = st.selectbox("场景规模", list(SCENARIO_PRESETS.keys()), index=1)
         algo_mode = st.selectbox(
             "算法选择",
-            ["仅最近优先", "仅最大优先", "双策略对比"],
-            index=2,
+            ["仅最近优先", "仅最大优先", "仅综合评分", "三策略对比"],
+            index=3,
         )
         num_steps = st.slider("仿真步数", min_value=5, max_value=200, value=40, step=5)
         tasks_per_step = st.slider("每步任务数", min_value=1, max_value=8, value=3, step=1)
         random_seed = st.number_input("随机种子", min_value=0, max_value=999999, value=42)
+        composite_preset = st.selectbox(
+            "综合评分预设",
+            list(COMPOSITE_CONFIG_PRESETS.keys()),
+            index=0,
+        )
 
         run_clicked = st.button("一键运行", type="primary", use_container_width=True)
 
@@ -173,12 +196,14 @@ def main() -> None:
         run_data: Dict[str, Dict[str, object]] = {}
 
         with st.spinner("正在运行仿真并生成图表..."):
-            if algo_mode in ("仅最近优先", "双策略对比"):
+            if algo_mode in ("仅最近优先", "三策略对比"):
                 n_results, n_frames, n_network, n_stations = _run_single_strategy(
                     "nearest",
                     num_steps=num_steps,
                     tasks_per_step=tasks_per_step,
                     scenario_name=scenario_name,
+                    random_seed=int(random_seed),
+                    composite_preset=composite_preset,
                 )
                 run_data["nearest"] = {
                     "results": n_results,
@@ -188,12 +213,14 @@ def main() -> None:
                     "timeline": _build_timeline(n_frames),
                 }
 
-            if algo_mode in ("仅最大优先", "双策略对比"):
+            if algo_mode in ("仅最大优先", "三策略对比"):
                 l_results, l_frames, l_network, l_stations = _run_single_strategy(
                     "largest",
                     num_steps=num_steps,
                     tasks_per_step=tasks_per_step,
                     scenario_name=scenario_name,
+                    random_seed=int(random_seed),
+                    composite_preset=composite_preset,
                 )
                 run_data["largest"] = {
                     "results": l_results,
@@ -201,6 +228,23 @@ def main() -> None:
                     "network": l_network,
                     "stations": l_stations,
                     "timeline": _build_timeline(l_frames),
+                }
+
+            if algo_mode in ("仅综合评分", "三策略对比"):
+                c_results, c_frames, c_network, c_stations = _run_single_strategy(
+                    "composite",
+                    num_steps=num_steps,
+                    tasks_per_step=tasks_per_step,
+                    scenario_name=scenario_name,
+                    random_seed=int(random_seed),
+                    composite_preset=composite_preset,
+                )
+                run_data[f"composite:{composite_preset}"] = {
+                    "results": c_results,
+                    "frames": c_frames,
+                    "network": c_network,
+                    "stations": c_stations,
+                    "timeline": _build_timeline(c_frames),
                 }
 
         st.session_state.dashboard_runs = run_data

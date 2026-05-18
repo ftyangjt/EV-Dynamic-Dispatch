@@ -1,190 +1,260 @@
-# 新能源物流车队协同调度 (EV Dynamic Dispatch)
+# EV Dynamic Dispatch
 
-本项目面向课程大作业：在城市动态任务场景下，对新能源物流车队进行协同调度与路径规划。系统以图结构建模道路网络，考虑车辆电量与载重约束、充电站排队压力、任务时效收益，并支持多策略对比与多规模仿真。
+一个面向电动车配送场景的动态调度仿真仓库。
 
-## 1. 项目目标
+仓库当前已经具备完整的基础闭环：
 
-- 使用图结构实现道路与寻路（Dijkstra/A*）。
-- 模拟动态出现的配送任务（生成时间、坐标、货重随机）。
-- 在车辆数有限、电量有限、载重有限的条件下完成任务调度。
-- 当电量不足时进行充电站决策，并考虑排队与负荷。
-- 至少实现两种调度策略并进行实验对比。
-- 在至少三种规模下评估算法表现。
-- 可选扩展：强化学习、元启发式、Gurobi/CPLEX 对标、图形化展示。
+- 路网建模与最短路计算
+- 动态任务生成
+- 车辆电量、载重、体积、货物类型约束
+- 充电站排队与充电过程
+- 多种调度策略对比
+- Matplotlib 动画可视化
+- Streamlit 仪表盘可视化
+- 多场景、多随机种子的 benchmark 实验
 
-## 2. 需求覆盖说明
+## 项目概览
 
-对应作业要求，当前方案覆盖如下：
+这个项目模拟的是一个城市内的新能源配送车队。系统会在离散时间步中不断生成新任务，然后由调度算法为车辆分配任务或安排充电，最后统计任务完成率、成本、路程、评分等指标。
 
-1. 车辆约束：`Vehicle` 包含电量上限、当前电量、载重上限。
-2. 动态任务：`Simulator` 按时间步随机生成 `Task`。
-3. 收益机制：按完成时效和路径成本计算评分，超时可扣分。
-4. 低电量充电：`EnergyManager` 支持最近/可达充电站选择。
-5. 充电站压力：`ChargingStation` 包含桩数、队列、等待时间估计。
-6. 协同任务：设计中预留多车协同接口，可作为增强功能实现。
-7. 多策略：已给出最近优先、最大优先，方案中含启发式/ACO/RL。
-8. 多规模：小/中/大三档场景定义已提供。
-9. 进阶：支持 RL、元启发式、精确求解器对标（可选加分）。
-10. GUI：可作为附加分方向（Pygame/Matplotlib 动态展示）。
+当前代码更像一个“可扩展的实验平台”，而不只是一个一次性 demo。你可以直接跑可视化，也可以把它当作调度算法测试床，继续加启发式、精确求解或学习型策略。
 
-## 3. 核心建模
+## 当前能力
 
-- 道路网络：`G=(N,E)`，节点为路网位置，边为道路连接与权重。
-- 车辆状态：位置、电量、载重、任务队列。
-- 任务状态：产生时间、起终点、货重、截止时间。
-- 充电站状态：位置、充电桩数量、队列长度、负荷压力。
-- 优化目标：提高任务完成率与收益，降低总路程、超时率与充电等待。
+### 1. 路网与仿真
 
-## 4. 调度策略
+- `RoadNetwork`：
+  使用网格路网和 `networkx` 建图，支持最短路距离和拥堵影响下的出行时间估计。
+- `Simulator`：
+  负责生成任务、推进充电站状态、调用调度器、执行动作、记录结果和轨迹帧。
+- `Task`：
+  包含起终点、重量、体积、deadline、货物类型、完成时间、失败时间等信息。
+- `Vehicle`：
+  包含车辆位置、电量、载重、体积、支持货物类型、充电状态等。
+- `ChargingStation`：
+  支持多充电桩、FIFO 排队、等待时间估计和充电过程推进。
 
-### 4.1 最近任务优先 (Nearest First)
+### 2. 已实现的调度策略
 
-- 思路：贪心地将车辆分配到最近可行任务。
-- 优点：响应快、实现简单、适合高频小任务。
-- 缺点：容易陷入局部最优，整体里程可能偏大。
+当前仓库内置三种策略：
 
-### 4.2 最大任务优先 (Largest First)
+- `nearest`
+  最近任务优先，偏简单贪心。
+- `largest`
+  最大任务优先，优先处理重量较大的任务。
+- `composite`
+  综合评分策略，会同时考虑距离、时间、deadline 风险、能耗、充电可达性、容量匹配和货物类型约束。
 
-- 思路：按任务货重降序分配，优先处理大单。
-- 优点：大任务等待时间较短，吞吐更稳定。
-- 缺点：可能牺牲小任务时效。
+策略实现位置：
 
-### 4.3 进阶策略 (可选)
+- [strategies.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/algorithms/strategies.py)
 
-- 启发式：最近邻插入 + 2-opt 局部优化。
-- 元启发式：蚁群算法 (ACO)。
-- 强化学习：DQN 进行动态决策学习。
-- 静态最优对标：Gurobi/CPLEX 建模求全局最优。
+### 3. 结果指标
 
-## 5. 充电与能量管理
+仿真当前会输出一组适合做实验比较的指标，包括：
 
-- 能耗模型示例：
-  `energy = distance * efficiency * (1 + load_factor) * weather_factor`
-- 充电决策：在可达充电站中综合距离、排队等待、充电时长选最优站点。
-- 排队建模：可使用简化队列模型或 M/M/c 排队论近似。
+- `completed`
+- `failed`
+- `generated`
+- `pending`
+- `completion_rate`
+- `failure_rate`
+- `on_time_rate`
+- `avg_delay_hours`
+- `avg_service_hours`
+- `total_distance`
+- `total_time_hours`
+- `total_cost`
+- `total_score`
+- `distance_per_completed_task`
+- `cost_per_completed_task`
+- `avg_battery_ratio`
+- `avg_station_wait_minutes`
 
-## 6. 仿真场景设计
+## 安装依赖
 
-- 小规模：3-5 车，24 小时，任务较低频。
-- 中规模：10-15 车，1 周，任务中频。
-- 大规模：50+ 车，长周期，含高峰/天气/故障扰动。
+```bash
+pip install -r requirements.txt
+```
 
-建议对比指标：
-- 完成率
-- 总收益/总评分
-- 平均延迟
-- 总行驶距离
-- 平均充电等待时间
-- 算法运行时长
-
-## 7. 代码与文档结构
-
-当前仓库文件：
-
-- `2026-大作业要求.txt`：原始作业需求。
-- `ev_dispatch/`：模块化工程代码（core/algorithms/simulator/scenarios）。
-- `quick_start.py`：兼容入口脚本（转发到模块化 `ev_dispatch.main`）。
-- `算法设计方案.md`：完整算法方案与扩展方向。
-- `项目开发路线图.md`：分阶段开发计划与评分对标。
-- `实现指南与技巧.py`：实现技巧、优化建议、调试模板。
-- `快速导航与Q&A.md`：阅读顺序与常见问题。
-- `启动检查清单.md`：环境、依赖、排错检查。
-
-建议后续演进目录：
+当前依赖很轻：
 
 ```text
-ev_dispatch/
-├── core/
-│   ├── network.py
-│   ├── vehicle.py
-│   ├── task.py
-│   └── charging.py
-├── algorithms/
-│   ├── dispatcher.py
-│   ├── strategies.py
-│   ├── heuristic.py
-│   ├── rl_agent.py
-│   └── exact_solver.py
-├── simulator/
-│   ├── simulator.py
-│   └── events.py
-├── scenarios/
-│   ├── small_scale.py
-│   ├── medium_scale.py
-│   └── large_scale.py
-├── visualization/
-│   ├── renderer.py
-│   └── dashboard.py
-└── main.py
+numpy
+networkx
+matplotlib
+streamlit
 ```
 
-## 8. 快速开始
+如果你的机器上有多个 Python 环境，建议始终用同一个解释器安装和运行。例如：
 
-### 8.1 环境准备
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install numpy scipy matplotlib networkx
+```powershell
+C:\Users\lhxsy\anaconda3\python.exe -m pip install -r requirements.txt
 ```
 
-### 8.2 运行示例
+## 快速开始
+
+### 1. 运行命令行 demo
 
 ```bash
-python quick_start.py
-# 或
 python -m ev_dispatch.main
+```
 
-# 启用 Matplotlib 动画（首版）
+这个入口会：
+
+- 创建默认场景
+- 分别运行 `nearest`、`largest`、`composite`
+- 打印每种策略的结果摘要
+- 输出最终对比
+
+### 2. 启动 Matplotlib 动画
+
+```bash
 python -m ev_dispatch.main --visualize --steps 20 --tasks-per-step 3
+```
 
-# 导出动画（GIF/MP4）
-python -m ev_dispatch.main --visualize --save-animation outputs/demo.gif --no-show
+如果只想播放某条策略轨迹：
 
-# Streamlit 第二阶段仪表盘
+```bash
+python -m ev_dispatch.main --visualize --visualize-strategy composite
+```
+
+可选值：
+
+- `nearest`
+- `largest`
+- `composite`
+
+导出 GIF：
+
+```bash
+python -m ev_dispatch.main --visualize --visualize-strategy composite --save-animation outputs/demo.gif --no-show
+```
+
+### 3. 启动 Streamlit 仪表盘
+
+```bash
 streamlit run ev_dispatch/visualization/streamlit_dashboard.py
 ```
 
-示例将输出两种策略在同一仿真设置下的完成任务数和评分对比。
+如果 `streamlit` 命令不可用：
 
-Matplotlib 首版说明：
-- 动画数据来源于 `Simulator.get_frames()` 的 `SimulationFrame` 序列。
-- 支持展示路网、车辆位置、车辆电量颜色、每步 pending/completed/failed 计数。
-- `--visualize-strategy` 可选 `nearest` 或 `largest`，用于指定播放哪条策略轨迹。
+```bash
+python -m streamlit run ev_dispatch/visualization/streamlit_dashboard.py
+```
 
-Streamlit 第二阶段说明：
-- 提供场景规模选择（小/中/大）、算法选择（最近/最大/双策略）、一键运行。
-- 图表面板包括：任务状态趋势、平均电量趋势、策略总评分对比、完成/失败对比。
-- 提供按 step 查看的路网快照面板，复用现有 `SimulationFrame` 数据流。
-- 路网快照面板支持自动播放轨迹、循环播放与播放间隔设置。
+启动后在浏览器打开本地地址，通常是：
 
-## 9. 实验与报告建议
+```text
+http://localhost:8501
+```
 
-- 实验至少覆盖 3 种规模，且每种规模多次随机重复（固定随机种子）。
-- 每种策略输出统一指标，形成对照表和可视化图。
-- 如果实现 Gurobi 对标：报告中给出动态策略与静态最优的差距及原因分析。
-- 展示材料建议包括：
-  - 演示视频（系统运行过程 + 结果对比）
-  - 项目报告（建模、算法、实验、结论）
-  - 源代码（可运行、结构清晰）
+当前 Streamlit 页面支持：
 
-## 10. 评分导向实现建议
+- 场景规模选择
+- 仿真步数和任务数设置
+- 随机种子设置
+- 最近优先 / 最大优先 / 综合评分 / 三策略对比
+- 任务趋势图
+- 平均电量趋势图
+- 路网快照与轨迹播放
 
-- 先保底：完成基础功能闭环（图建模 + 两策略 + 充电 + 三规模）。
-- 再拉分：增加启发式优化和结果可视化。
-- 冲高分：增加 RL 或 Gurobi 对标，并做好分析解释。
+Streamlit 仪表盘已经接入 `composite` 策略，可直接在算法选择中运行单策略或三策略对比。
 
-## 11. 注意事项
+更详细的可视化说明见：
 
-- 调用现成算法可以，但必须能解释原理与参数含义。
-- 实验结果要可复现（随机种子、参数配置、版本说明）。
-- 重点展示“为什么这样设计”和“不同策略差异原因”。
+- [可视化仿真使用教程.md](</c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/docs/可视化仿真使用教程.md>)
 
----
+## 运行 benchmark
 
-如需下一步，我可以基于这个 README 继续帮你：
+仓库提供了一个可复现实验入口：
 
-1. 搭建可直接提交的项目目录与模板代码。
-2. 把 `quick_start.py` 拆分为模块化工程结构。
-3. 增加一版可视化仿真界面（加分项）。
+```bash
+python -m ev_dispatch.benchmark
+```
+
+默认会运行：
+
+- `small_city`
+- `nearest,largest,composite`
+- `42,43,44` 三个随机种子
+
+自定义示例：
+
+```bash
+python -m ev_dispatch.benchmark --scales small_city,medium_city --strategies nearest,composite --seeds 42,43 --steps 24 --tasks-per-step 4 --tag my_run
+```
+
+`composite` 支持预设权重变体，可用于快速调参对比：
+
+```bash
+python -m ev_dispatch.benchmark --strategies composite,composite:deadline,composite:cost,composite:energy --seeds 42,43 --steps 12 --tasks-per-step 3 --tag composite_tuning
+```
+
+当前内置预设：
+
+- `composite` 或 `composite:balanced`
+- `composite:deadline`
+- `composite:cost`
+- `composite:energy`
+
+输出文件位于 `outputs/benchmarks/`：
+
+- `runs_<tag>.csv`
+- `summary_<tag>.csv`
+- `benchmark_<tag>.json`
+
+这部分代码在：
+
+- [benchmark.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/benchmark.py)
+
+## 场景配置
+
+默认提供四档城市规模：
+
+- `small_city`
+- `medium_city`
+- `large_city`
+- `mega_city`
+
+定义位置：
+
+- [city_scales.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/scenarios/city_scales.py)
+
+默认场景构建逻辑在：
+
+- [default.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/scenarios/default.py)
+
+## 目录结构
+
+```text
+ev_dispatch/
+├── algorithms/      # 调度策略与接口
+├── core/            # 路网、车辆、任务、能耗、充电等核心模型
+├── scenarios/       # 默认场景与城市规模配置
+├── simulator/       # 主仿真循环
+├── visualization/   # Matplotlib 与 Streamlit 可视化
+├── benchmark.py     # 批量实验入口
+└── main.py          # demo 与动画入口
+```
+
+`docs/` 目录下放的是补充说明文档，包括可视化教程和一些项目分析材料。
+
+## 适合继续扩展的方向
+
+如果你打算继续把这个仓库往“算法项目”推进，比较自然的方向有：
+
+- 基于 benchmark 输出继续扩大 `composite` 权重搜索范围
+- 增加更细粒度的可视化状态，例如车辆在途、充电、空闲的图例和筛选
+- 增加滚动规划或插入式路径构造
+- 引入更严格的时间窗 / 服务时间建模
+- 增加 RL 或精确求解器对照实验
+
+## 相关入口文件
+
+- [main.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/main.py)
+- [benchmark.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/benchmark.py)
+- [simulator.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/simulator/simulator.py)
+- [strategies.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/algorithms/strategies.py)
+- [streamlit_dashboard.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/visualization/streamlit_dashboard.py)
+- [matplotlib_player.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/visualization/matplotlib_player.py)

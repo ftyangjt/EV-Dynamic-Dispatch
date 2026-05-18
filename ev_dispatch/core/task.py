@@ -30,6 +30,15 @@ class Task:
     deadline: datetime
     # 任务开始进入运输/调度系统的时间（用于区分“创建时间”和“进入运输队列/可被调度时间”）
     start_transport_time: Optional[datetime] = None
+    transport_start_position: Optional[Location] = None
+    planned_pickup_time: Optional[datetime] = None
+    planned_completion_time: Optional[datetime] = None
+    completed_time: Optional[datetime] = None
+    failed_time: Optional[datetime] = None
+    planned_distance: float = 0.0
+    planned_time_hours: float = 0.0
+    planned_cost: float = 0.0
+    planned_score: float = 0.0
     cargo_type: CargoType = CargoType.TYPE_1  # 货物类型
     priority: float = 1.0
     completed: bool = False
