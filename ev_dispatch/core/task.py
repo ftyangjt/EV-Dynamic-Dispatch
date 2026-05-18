@@ -33,6 +33,10 @@ class Task:
     transport_start_position: Optional[Location] = None
     planned_pickup_time: Optional[datetime] = None
     planned_completion_time: Optional[datetime] = None
+    pickup_path: List[Location] = field(default_factory=list)
+    delivery_path: List[Location] = field(default_factory=list)
+    pickup_timed_path: List[tuple] = field(default_factory=list)
+    delivery_timed_path: List[tuple] = field(default_factory=list)
     completed_time: Optional[datetime] = None
     failed_time: Optional[datetime] = None
     planned_distance: float = 0.0

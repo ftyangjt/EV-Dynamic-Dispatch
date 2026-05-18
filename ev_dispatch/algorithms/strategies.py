@@ -315,11 +315,29 @@ class DispatcherCompositeScore(Dispatcher):
         )
         total_distance = pickup_distance + delivery_distance
         total_hours = pickup_hours + delivery_hours
+        pickup_road_metrics = state.network.path_road_metrics(
+            vehicle.position,
+            task.origin,
+            start_time=depart_time,
+            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+        )
+        delivery_road_metrics = state.network.path_road_metrics(
+            task.origin,
+            task.destination,
+            start_time=depart_time + timedelta(hours=pickup_hours),
+            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+        )
+        road_energy_factor = (
+            pickup_road_metrics["energy_factor"] * pickup_distance
+            + delivery_road_metrics["energy_factor"] * delivery_distance
+        ) / max(1e-9, total_distance)
+        avg_route_speed = total_distance / max(1e-9, total_hours)
         energy = EnergyManager.calculate_consumption(
             distance=total_distance,
             load=task.weight,
-            speed_kmh=vehicle.current_speed_kmh,
+            speed_kmh=avg_route_speed,
             efficiency=vehicle.efficiency,
+            weather_factor=road_energy_factor,
         )
 
         nearest_station = self._nearest_station_for(state, vehicle)

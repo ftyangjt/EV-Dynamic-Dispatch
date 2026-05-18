@@ -124,6 +124,56 @@ class Simulator:
             start.y + (end.y - start.y) * ratio,
         )
 
+    def _interpolate_path_position(self, path: List[Location], ratio: float) -> tuple:
+        if not path:
+            return (0.0, 0.0)
+        if len(path) == 1:
+            return (path[0].x, path[0].y)
+
+        ratio = max(0.0, min(1.0, ratio))
+        segment_lengths = [
+            path[i].distance_to(path[i + 1])
+            for i in range(len(path) - 1)
+        ]
+        total_length = sum(segment_lengths)
+        if total_length <= 1e-9:
+            return (path[-1].x, path[-1].y)
+
+        target_distance = total_length * ratio
+        covered = 0.0
+        for i, segment_length in enumerate(segment_lengths):
+            if covered + segment_length >= target_distance:
+                local_ratio = (target_distance - covered) / max(1e-9, segment_length)
+                return self._interpolate_position(path[i], path[i + 1], local_ratio)
+            covered += segment_length
+
+        return (path[-1].x, path[-1].y)
+
+    def _interpolate_timed_path_position(self, timed_path: List[tuple], elapsed_hours: float) -> tuple:
+        if not timed_path:
+            return (0.0, 0.0)
+        if len(timed_path) == 1:
+            loc, _hours = timed_path[0]
+            return (loc.x, loc.y)
+
+        elapsed_hours = max(0.0, float(elapsed_hours))
+        first_loc, first_hours = timed_path[0]
+        if elapsed_hours <= float(first_hours):
+            return (first_loc.x, first_loc.y)
+
+        for index in range(1, len(timed_path)):
+            prev_loc, prev_hours = timed_path[index - 1]
+            next_loc, next_hours = timed_path[index]
+            prev_hours = float(prev_hours)
+            next_hours = float(next_hours)
+            if elapsed_hours <= next_hours:
+                segment_hours = max(1e-9, next_hours - prev_hours)
+                local_ratio = (elapsed_hours - prev_hours) / segment_hours
+                return self._interpolate_position(prev_loc, next_loc, local_ratio)
+
+        last_loc, _last_hours = timed_path[-1]
+        return (last_loc.x, last_loc.y)
+
     def _vehicle_display_position(self, vehicle: Vehicle, display_time: Optional[datetime] = None) -> tuple:
         if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
             return (vehicle.position.x, vehicle.position.y)
@@ -149,14 +199,20 @@ class Simulator:
         if now <= pickup_time and pickup_time > task.start_transport_time:
             elapsed = (now - task.start_transport_time).total_seconds()
             duration = (pickup_time - task.start_transport_time).total_seconds()
-            return self._interpolate_position(task.transport_start_position, task.origin, elapsed / duration)
+            if task.pickup_timed_path:
+                return self._interpolate_timed_path_position(task.pickup_timed_path, elapsed / 3600.0)
+            path = task.pickup_path or [task.transport_start_position, task.origin]
+            return self._interpolate_path_position(path, elapsed / duration)
 
         delivery_start = max(pickup_time, task.start_transport_time)
         elapsed = (now - delivery_start).total_seconds()
         duration = (task.planned_completion_time - delivery_start).total_seconds()
         if duration <= 0:
             return (task.destination.x, task.destination.y)
-        return self._interpolate_position(task.origin, task.destination, elapsed / duration)
+        if task.delivery_timed_path:
+            return self._interpolate_timed_path_position(task.delivery_timed_path, elapsed / 3600.0)
+        path = task.delivery_path or [task.origin, task.destination]
+        return self._interpolate_path_position(path, elapsed / duration)
 
     # #region agent log
     def _dbg(self, hypothesisId: str, location: str, message: str, data: dict) -> None:
@@ -353,6 +409,12 @@ class Simulator:
 
             depart_time = self.current_time
             dist_to_station = self.network.shortest_distance(vehicle.position, station.position, method="dijkstra")
+            station_road_metrics = self.network.path_road_metrics(
+                vehicle.position,
+                station.position,
+                start_time=depart_time,
+                vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+            )
             t_to_station = self.network.shortest_travel_time_hours(
                 vehicle.position,
                 station.position,
@@ -364,8 +426,9 @@ class Simulator:
             energy_to_station = EnergyManager.calculate_consumption(
                 distance=dist_to_station,
                 load=0.0,
-                speed_kmh=vehicle.current_speed_kmh,
+                speed_kmh=station_road_metrics["avg_speed_kmph"],
                 efficiency=vehicle.efficiency,
+                weather_factor=station_road_metrics["energy_factor"],
             )
 
             distance_delta += dist_to_station
@@ -397,6 +460,12 @@ class Simulator:
         # 路网距离与行驶时间（拥堵随当前时刻变化）
         depart_time = self.current_time
         dist_to_pickup = self.network.shortest_distance(vehicle.position, task.origin, method="dijkstra")
+        pickup_road_metrics = self.network.path_road_metrics(
+            vehicle.position,
+            task.origin,
+            start_time=depart_time,
+            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+        )
         t_to_pickup = self.network.shortest_travel_time_hours(
             vehicle.position,
             task.origin,
@@ -407,7 +476,37 @@ class Simulator:
         # 近似：到达取货点后的时间 = depart_time + t_to_pickup（拥堵按到达时刻重新取一片）
         arrive_pickup_time = depart_time + timedelta(hours=t_to_pickup)
         transport_start_position = Location(vehicle.position.x, vehicle.position.y, vehicle.position.name)
+        pickup_path = self.network.shortest_path_locations(
+            transport_start_position,
+            task.origin,
+            method="dijkstra",
+        )
+        pickup_timed_path = self.network.timed_path_locations(
+            transport_start_position,
+            task.origin,
+            start_time=depart_time,
+            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+            method="dijkstra",
+        )
         dist_delivery = self.network.shortest_distance(task.origin, task.destination, method="dijkstra")
+        delivery_road_metrics = self.network.path_road_metrics(
+            task.origin,
+            task.destination,
+            start_time=arrive_pickup_time,
+            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+        )
+        delivery_path = self.network.shortest_path_locations(
+            task.origin,
+            task.destination,
+            method="dijkstra",
+        )
+        delivery_timed_path = self.network.timed_path_locations(
+            task.origin,
+            task.destination,
+            start_time=arrive_pickup_time,
+            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+            method="dijkstra",
+        )
         t_delivery = self.network.shortest_travel_time_hours(
             task.origin,
             task.destination,
@@ -417,12 +516,18 @@ class Simulator:
 
         dist = dist_to_pickup + dist_delivery
         time_delta_hours = t_to_pickup + t_delivery
+        road_energy_factor = (
+            pickup_road_metrics["energy_factor"] * dist_to_pickup
+            + delivery_road_metrics["energy_factor"] * dist_delivery
+        ) / max(1e-9, dist)
+        avg_route_speed = dist / max(1e-9, time_delta_hours)
         # Calculate energy considering vehicle's current speed
         energy_used = EnergyManager.calculate_consumption(
             distance=dist,
             load=task.weight,
-            speed_kmh=vehicle.current_speed_kmh,
-            efficiency=vehicle.efficiency
+            speed_kmh=avg_route_speed,
+            efficiency=vehicle.efficiency,
+            weather_factor=road_energy_factor,
         )
         distance_delta += dist
 
@@ -452,7 +557,17 @@ class Simulator:
         distance_cost = dist * base_cost_per_km
         weight_cost = dist * task.weight * weight_cost_per_kg_km
         energy_cost = energy_used * energy_cost_per_kwh
-        cost_delta = (distance_cost + weight_cost + energy_cost) * mult
+        road_cost = (
+            pickup_road_metrics["toll_cost"]
+            + delivery_road_metrics["toll_cost"]
+            + pickup_road_metrics["risk_cost"]
+            + delivery_road_metrics["risk_cost"]
+        )
+        restriction_penalty = (
+            pickup_road_metrics["restricted_distance_km"]
+            + delivery_road_metrics["restricted_distance_km"]
+        ) * 2.0
+        cost_delta = (distance_cost + weight_cost + energy_cost + road_cost + restriction_penalty) * mult
 
         # 检查：车辆是否支持该货物类型
         cargo_type = getattr(task.cargo_type, "value", task.cargo_type)
@@ -474,6 +589,10 @@ class Simulator:
             task.transport_start_position = transport_start_position
             task.planned_pickup_time = arrive_pickup_time
             task.planned_completion_time = vehicle.available_at
+            task.pickup_path = pickup_path
+            task.delivery_path = delivery_path
+            task.pickup_timed_path = pickup_timed_path
+            task.delivery_timed_path = delivery_timed_path
             task.planned_distance = distance_delta
             task.planned_time_hours = time_delta_hours
             task.planned_cost = cost_delta
