@@ -1,9 +1,9 @@
-import numpy as np
-import networkx as nx
-import heapq
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+
+import networkx as nx
+import numpy as np
 
 from ev_dispatch.core.location import Location
 
@@ -16,7 +16,7 @@ class CongestionModel:
     Returns a multiplier in (min_multiplier, 1.0], where lower means slower traffic.
     """
 
-    morning_peak: Tuple[int, int] = (7, 10)  # inclusive start, exclusive end
+    morning_peak: Tuple[int, int] = (7, 10)
     evening_peak: Tuple[int, int] = (17, 20)
     min_multiplier: float = 0.35
 
@@ -26,7 +26,6 @@ class CongestionModel:
         def peak_strength(h: float, start: int, end: int) -> float:
             if h < start or h >= end:
                 return 0.0
-            # Smooth bump: 0 -> 1 -> 0 over [start, end)
             x = (h - start) / max(1e-9, (end - start))
             return float(np.sin(np.pi * x))
 
@@ -34,11 +33,9 @@ class CongestionModel:
             peak_strength(hour, self.morning_peak[0], self.morning_peak[1])
             + peak_strength(hour, self.evening_peak[0], self.evening_peak[1])
         )
-
-        # edge_peak_intensity \in [0,1], higher means more sensitive to peaks
         slowdown = min(1.0, base * float(np.clip(edge_peak_intensity, 0.0, 1.0)))
-        m = 1.0 - slowdown * (1.0 - self.min_multiplier)
-        return float(np.clip(m, self.min_multiplier, 1.0))
+        multiplier = 1.0 - slowdown * (1.0 - self.min_multiplier)
+        return float(np.clip(multiplier, self.min_multiplier, 1.0))
 
 
 class RoadNetwork:
@@ -91,7 +88,18 @@ class RoadNetwork:
         self.width = width
         self.height = height
         self.graph = nx.Graph()
-        self.nodes = []
+        self.nodes: List[Tuple[str, Location]] = []
+        self._node_location_map: Dict[str, Location] = {}
+        self._node_ids: List[str] = []
+        self._node_xy: np.ndarray = np.empty((0, 2), dtype=float)
+
+        self._nearest_node_cache: Dict[Tuple[float, float, str], Optional[str]] = {}
+        self._distance_cache: Dict[Tuple[str, str, str], float] = {}
+        self._distance_path_cache: Dict[Tuple[str, str, str], List[str]] = {}
+        self._time_path_cache: Dict[Tuple[str, str, str, str, Optional[float]], List[str]] = {}
+        self._time_length_cache: Dict[Tuple[str, str, str, Optional[float]], float] = {}
+        self._road_metrics_cache: Dict[Tuple[str, str, str, str, Optional[float]], Dict[str, float]] = {}
+
         self.congestion_model = CongestionModel()
         self.random_seed = random_seed
         self.rng = rng or np.random.default_rng(random_seed)
@@ -102,8 +110,13 @@ class RoadNetwork:
                 x = i * (width / grid_size) + width / (2 * grid_size)
                 y = j * (height / grid_size) + height / (2 * grid_size)
                 node_id = f"node_{i}_{j}"
-                self.nodes.append((node_id, Location(x, y, node_id)))
+                location = Location(x, y, node_id)
+                self.nodes.append((node_id, location))
+                self._node_location_map[node_id] = location
                 self.graph.add_node(node_id)
+
+        self._node_ids = [node_id for node_id, _loc in self.nodes]
+        self._node_xy = np.array([(loc.x, loc.y) for _node_id, loc in self.nodes], dtype=float)
 
         for i in range(len(self.nodes)):
             for j in range(i + 1, len(self.nodes)):
@@ -111,14 +124,13 @@ class RoadNetwork:
                 node_j, loc_j = self.nodes[j]
                 dist = loc_i.distance_to(loc_j)
                 max_grid_dist = max(width, height) / grid_size
-                if dist <= max_grid_dist *1.1:
+                if dist <= max_grid_dist * 1.1:
                     road_type = self._sample_road_type()
                     road_attrs = self._build_road_attributes(road_type, dist)
                     self.graph.add_edge(
                         node_i,
                         node_j,
                         **road_attrs,
-                        # Back-compat: keep weight as distance for distance-based shortest path
                         weight=float(dist),
                     )
 
@@ -152,6 +164,168 @@ class RoadNetwork:
             "toll_per_km": float(profile["toll_per_km"]),
             "accident_risk": float(self.rng.uniform(profile["risk_min"], profile["risk_max"])),
             "truck_restriction": truck_restriction,
+        }
+
+    @staticmethod
+    def _location_cache_key(location: Location) -> Tuple[float, float, str]:
+        return (round(float(location.x), 9), round(float(location.y), 9), str(location.name))
+
+    @staticmethod
+    def _time_cache_key(start_time: datetime) -> str:
+        return start_time.isoformat(timespec="minutes")
+
+    @staticmethod
+    def _speed_key(vehicle_max_speed_kmh: Optional[float]) -> Optional[float]:
+        return None if vehicle_max_speed_kmh is None else float(vehicle_max_speed_kmh)
+
+    @staticmethod
+    def _fallback_speed(vehicle_max_speed_kmh: Optional[float] = None) -> float:
+        speed = 40.0
+        if vehicle_max_speed_kmh is not None:
+            speed = min(speed, float(vehicle_max_speed_kmh))
+        return max(1e-6, speed)
+
+    def _nodes_for_locations(self, start: Location, end: Location) -> Tuple[Optional[str], Optional[str]]:
+        return self._find_nearest_node(start), self._find_nearest_node(end)
+
+    def _node_location(self, node_id: str) -> Optional[Location]:
+        return self._node_location_map.get(node_id)
+
+    def _distance_path_node_ids(
+        self,
+        start_node: str,
+        end_node: str,
+        method: str = "dijkstra",
+        heuristic_target: Optional[Location] = None,
+    ) -> List[str]:
+        cache_key = (start_node, end_node, method)
+        if cache_key in self._distance_path_cache:
+            return list(self._distance_path_cache[cache_key])
+
+        if method == "a_star":
+            target = heuristic_target or self._node_location(end_node)
+
+            def heuristic(node):
+                loc = self._node_location(node)
+                if loc is None or target is None:
+                    return 0.0
+                return loc.distance_to(target)
+
+            node_path = nx.astar_path(
+                self.graph,
+                start_node,
+                end_node,
+                heuristic=heuristic,
+                weight="length_km",
+            )
+        else:
+            node_path = nx.dijkstra_path(self.graph, start_node, end_node, weight="length_km")
+
+        self._distance_path_cache[cache_key] = list(node_path)
+        self._distance_path_cache[(end_node, start_node, method)] = list(reversed(node_path))
+        return list(node_path)
+
+    def _distance_path_length(self, start_node: str, end_node: str, method: str = "dijkstra") -> float:
+        cache_key = (start_node, end_node, method)
+        if cache_key in self._distance_cache:
+            return self._distance_cache[cache_key]
+
+        node_path = self._distance_path_node_ids(start_node, end_node, method=method)
+        distance = 0.0
+        for u, v in zip(node_path, node_path[1:]):
+            distance += float(self.graph[u][v].get("length_km", 0.0))
+
+        self._distance_cache[cache_key] = float(distance)
+        self._distance_cache[(end_node, start_node, method)] = float(distance)
+        return float(distance)
+
+    def _time_path_node_ids(
+        self,
+        start_node: str,
+        end_node: str,
+        start_time: datetime,
+        vehicle_max_speed_kmh: Optional[float] = None,
+        method: str = "dijkstra",
+        heuristic_target: Optional[Location] = None,
+    ) -> List[str]:
+        cache_key = (
+            start_node,
+            end_node,
+            self._time_cache_key(start_time),
+            method,
+            self._speed_key(vehicle_max_speed_kmh),
+        )
+        if cache_key in self._time_path_cache:
+            return list(self._time_path_cache[cache_key])
+
+        def time_weight(_u: str, _v: str, attrs: dict) -> float:
+            length_km = float(attrs.get("length_km", 0.0))
+            speed = self.effective_edge_speed_kmph(
+                attrs,
+                start_time=start_time,
+                vehicle_max_speed_kmh=vehicle_max_speed_kmh,
+            )
+            return length_km / max(1e-6, speed)
+
+        if method == "a_star":
+            target = heuristic_target or self._node_location(end_node)
+
+            def heuristic(node):
+                loc = self._node_location(node)
+                if loc is None or target is None:
+                    return 0.0
+                return loc.distance_to(target) / self._fallback_speed(vehicle_max_speed_kmh)
+
+            node_path = nx.astar_path(
+                self.graph,
+                start_node,
+                end_node,
+                heuristic=heuristic,
+                weight=time_weight,
+            )
+        else:
+            node_path = nx.dijkstra_path(self.graph, start_node, end_node, weight=time_weight)
+
+        self._time_path_cache[cache_key] = list(node_path)
+        self._time_path_cache[(end_node, start_node, cache_key[2], method, cache_key[4])] = list(
+            reversed(node_path)
+        )
+        return list(node_path)
+
+    def _path_travel_time_hours(
+        self,
+        node_path: List[str],
+        start_time: datetime,
+        vehicle_max_speed_kmh: Optional[float] = None,
+    ) -> float:
+        total_hours = 0.0
+        for u, v in zip(node_path, node_path[1:]):
+            attrs = self.graph[u][v]
+            length = float(attrs.get("length_km", 0.0))
+            speed = self.effective_edge_speed_kmph(
+                attrs,
+                start_time=start_time,
+                vehicle_max_speed_kmh=vehicle_max_speed_kmh,
+            )
+            total_hours += length / max(1e-6, speed)
+        return float(total_hours)
+
+    def _fallback_metrics(
+        self,
+        start: Location,
+        end: Location,
+        vehicle_max_speed_kmh: Optional[float] = None,
+    ) -> Dict[str, float]:
+        distance = start.distance_to(end)
+        speed = self._fallback_speed(vehicle_max_speed_kmh)
+        return {
+            "distance_km": distance,
+            "time_hours": distance / speed,
+            "avg_speed_kmph": speed,
+            "energy_factor": 1.0,
+            "toll_cost": 0.0,
+            "risk_cost": 0.0,
+            "restricted_distance_km": 0.0,
         }
 
     def effective_edge_speed_kmph(
@@ -189,66 +363,27 @@ class RoadNetwork:
         return float(surface_factor * slope_factor * stop_go_factor * risk_factor)
 
     def dijkstra(self, start: Location, end: Location) -> float:
-        """
-        Dijkstra算法: 计算两点间的最短距离
-        
-        Args:
-            start: 起始位置
-            end: 目标位置
-            
-        Returns:
-            最短距离(km)
-        """
-        start_node = self._find_nearest_node(start)
-        end_node = self._find_nearest_node(end)
-        
+        """Calculate shortest distance with cached Dijkstra paths."""
+        start_node, end_node = self._nodes_for_locations(start, end)
         if start_node is None or end_node is None:
             return start.distance_to(end)
-        
-        # 使用NetworkX内置的Dijkstra实现
         try:
-            shortest_path_distance = nx.dijkstra_path_length(
-                self.graph, start_node, end_node, weight="length_km"
-            )
-            return shortest_path_distance
-        except nx.NetworkXNoPath:
-            # 如果没有路径，返回直线距离
+            return self._distance_path_length(start_node, end_node, method="dijkstra")
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
             return start.distance_to(end)
 
     def a_star(self, start: Location, end: Location) -> float:
-        """
-        A*算法: 计算两点间的最短距离(使用欧几里得距离作为启发函数)
-        
-        Args:
-            start: 起始位置
-            end: 目标位置
-            
-        Returns:
-            最短距离(km)
-        """
-        start_node = self._find_nearest_node(start)
-        end_node = self._find_nearest_node(end)
-        
+        """Calculate shortest distance with cached A* paths."""
+        start_node, end_node = self._nodes_for_locations(start, end)
         if start_node is None or end_node is None:
             return start.distance_to(end)
-        
-        # 定义启发函数(欧几里得距离)
-        def heuristic(node):
-            _, loc = self._get_node_location(node)
-            return loc.distance_to(end)
-        
-        # 使用NetworkX内置的A*实现
         try:
-            shortest_path_distance = nx.astar_path_length(
-                self.graph, start_node, end_node, heuristic=heuristic, weight="length_km"
-            )
-            return shortest_path_distance
+            return self._distance_path_length(start_node, end_node, method="a_star")
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            # 如果没有路径，返回直线距离
             return start.distance_to(end)
 
     def shortest_distance(self, start: Location, end: Location, method: str = "dijkstra") -> float:
-        """统一入口：计算最短路程长度（km）。"""
+        """Calculate shortest road distance in km."""
         if method == "a_star":
             return self.a_star(start, end)
         return self.dijkstra(start, end)
@@ -260,42 +395,22 @@ class RoadNetwork:
         method: str = "dijkstra",
     ) -> List[Location]:
         """Return the shortest path as road-node locations for visualization."""
-        start_node = self._find_nearest_node(start)
-        end_node = self._find_nearest_node(end)
-
+        start_node, end_node = self._nodes_for_locations(start, end)
         if start_node is None or end_node is None:
             return [start, end]
 
         try:
-            if method == "a_star":
-                def heuristic(node):
-                    _, loc = self._get_node_location(node)
-                    return loc.distance_to(end)
-
-                node_path = nx.astar_path(
-                    self.graph,
-                    start_node,
-                    end_node,
-                    heuristic=heuristic,
-                    weight="length_km",
-                )
-            else:
-                node_path = nx.dijkstra_path(
-                    self.graph,
-                    start_node,
-                    end_node,
-                    weight="length_km",
-                )
+            node_path = self._distance_path_node_ids(
+                start_node,
+                end_node,
+                method=method,
+                heuristic_target=end,
+            )
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return [start, end]
 
-        locations: List[Location] = []
-        for node_id in node_path:
-            node_info = self._get_node_location(node_id)
-            if node_info is not None:
-                locations.append(node_info[1])
-
-        return locations or [start, end]
+        locations = [self._node_location(node_id) for node_id in node_path]
+        return [loc for loc in locations if loc is not None] or [start, end]
 
     def timed_path_locations(
         self,
@@ -306,64 +421,43 @@ class RoadNetwork:
         method: str = "dijkstra",
     ) -> List[Tuple[Location, float]]:
         """Return path locations with cumulative travel hours at each node."""
-        start_node = self._find_nearest_node(start)
-        end_node = self._find_nearest_node(end)
-
+        start_node, end_node = self._nodes_for_locations(start, end)
         if start_node is None or end_node is None:
             distance = start.distance_to(end)
-            speed = min(40.0, float(vehicle_max_speed_kmh or 40.0))
-            return [(start, 0.0), (end, distance / max(1e-6, speed))]
-
-        def time_weight(u: str, v: str, attrs: dict) -> float:
-            length_km = float(attrs.get("length_km", 0.0))
-            speed = self.effective_edge_speed_kmph(
-                attrs,
-                start_time=start_time,
-                vehicle_max_speed_kmh=vehicle_max_speed_kmh,
-            )
-            return length_km / max(1e-6, speed)
+            speed = self._fallback_speed(vehicle_max_speed_kmh)
+            return [(start, 0.0), (end, distance / speed)]
 
         try:
-            if method == "a_star":
-                def heuristic(node):
-                    _, loc = self._get_node_location(node)
-                    fallback_speed = min(40.0, float(vehicle_max_speed_kmh or 40.0))
-                    return loc.distance_to(end) / max(1e-6, fallback_speed)
-
-                node_path = nx.astar_path(
-                    self.graph,
-                    start_node,
-                    end_node,
-                    heuristic=heuristic,
-                    weight=time_weight,
-                )
-            else:
-                node_path = nx.dijkstra_path(self.graph, start_node, end_node, weight=time_weight)
+            node_path = self._time_path_node_ids(
+                start_node,
+                end_node,
+                start_time=start_time,
+                vehicle_max_speed_kmh=vehicle_max_speed_kmh,
+                method=method,
+                heuristic_target=end,
+            )
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             distance = start.distance_to(end)
-            speed = min(40.0, float(vehicle_max_speed_kmh or 40.0))
-            return [(start, 0.0), (end, distance / max(1e-6, speed))]
+            speed = self._fallback_speed(vehicle_max_speed_kmh)
+            return [(start, 0.0), (end, distance / speed)]
 
         timed_path: List[Tuple[Location, float]] = []
         cumulative_hours = 0.0
         for index, node_id in enumerate(node_path):
-            node_info = self._get_node_location(node_id)
-            if node_info is None:
+            loc = self._node_location(node_id)
+            if loc is None:
                 continue
-            if index == 0:
-                timed_path.append((node_info[1], cumulative_hours))
-                continue
-
-            prev_node = node_path[index - 1]
-            attrs = self.graph[prev_node][node_id]
-            length = float(attrs.get("length_km", 0.0))
-            speed = self.effective_edge_speed_kmph(
-                attrs,
-                start_time=start_time,
-                vehicle_max_speed_kmh=vehicle_max_speed_kmh,
-            )
-            cumulative_hours += length / max(1e-6, speed)
-            timed_path.append((node_info[1], cumulative_hours))
+            if index > 0:
+                prev_node = node_path[index - 1]
+                attrs = self.graph[prev_node][node_id]
+                length = float(attrs.get("length_km", 0.0))
+                speed = self.effective_edge_speed_kmph(
+                    attrs,
+                    start_time=start_time,
+                    vehicle_max_speed_kmh=vehicle_max_speed_kmh,
+                )
+                cumulative_hours += length / max(1e-6, speed)
+            timed_path.append((loc, cumulative_hours))
 
         return timed_path or [(start, 0.0), (end, 0.0)]
 
@@ -374,39 +468,39 @@ class RoadNetwork:
         start_time: datetime,
         vehicle_max_speed_kmh: Optional[float] = None,
     ) -> float:
-        """
-        计算在给定出发时刻的最短行驶时间（小时）。
-
-        这里采用“时刻切片”的近似：在 start_time 时刻，把每条边的拥堵倍率固定下来，
-        然后做一次按时间权重的 Dijkstra。
-        """
-        start_node = self._find_nearest_node(start)
-        end_node = self._find_nearest_node(end)
-
+        """Calculate cached shortest travel time at a given departure time."""
+        start_node, end_node = self._nodes_for_locations(start, end)
         if start_node is None or end_node is None:
-            dist = start.distance_to(end)
-            fallback_speed = 40.0
-            if vehicle_max_speed_kmh is not None:
-                fallback_speed = min(fallback_speed, float(vehicle_max_speed_kmh))
-            return dist / max(1e-6, fallback_speed)
+            return start.distance_to(end) / self._fallback_speed(vehicle_max_speed_kmh)
 
-        def time_weight(u: str, v: str, attrs: dict) -> float:
-            length_km = float(attrs.get("length_km", 0.0))
-            speed = self.effective_edge_speed_kmph(
-                attrs,
+        cache_key = (
+            start_node,
+            end_node,
+            self._time_cache_key(start_time),
+            self._speed_key(vehicle_max_speed_kmh),
+        )
+        if cache_key in self._time_length_cache:
+            return self._time_length_cache[cache_key]
+
+        try:
+            node_path = self._time_path_node_ids(
+                start_node,
+                end_node,
+                start_time=start_time,
+                vehicle_max_speed_kmh=vehicle_max_speed_kmh,
+                method="dijkstra",
+            )
+            total_hours = self._path_travel_time_hours(
+                node_path,
                 start_time=start_time,
                 vehicle_max_speed_kmh=vehicle_max_speed_kmh,
             )
-            return length_km / speed  # hours
-
-        try:
-            return float(nx.dijkstra_path_length(self.graph, start_node, end_node, weight=time_weight))
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            dist = start.distance_to(end)
-            fallback_speed = 40.0
-            if vehicle_max_speed_kmh is not None:
-                fallback_speed = min(fallback_speed, float(vehicle_max_speed_kmh))
-            return dist / max(1e-6, fallback_speed)
+            return start.distance_to(end) / self._fallback_speed(vehicle_max_speed_kmh)
+
+        self._time_length_cache[cache_key] = float(total_hours)
+        self._time_length_cache[(end_node, start_node, cache_key[2], cache_key[3])] = float(total_hours)
+        return float(total_hours)
 
     def path_road_metrics(
         self,
@@ -416,47 +510,30 @@ class RoadNetwork:
         vehicle_max_speed_kmh: Optional[float] = None,
         method: str = "dijkstra",
     ) -> Dict[str, float]:
-        """Aggregate road attributes along the shortest path."""
-        start_node = self._find_nearest_node(start)
-        end_node = self._find_nearest_node(end)
+        """Aggregate road attributes along the cached shortest distance path."""
+        start_node, end_node = self._nodes_for_locations(start, end)
         if start_node is None or end_node is None:
-            distance = start.distance_to(end)
-            return {
-                "distance_km": distance,
-                "time_hours": distance / max(1e-6, min(40.0, float(vehicle_max_speed_kmh or 40.0))),
-                "avg_speed_kmph": min(40.0, float(vehicle_max_speed_kmh or 40.0)),
-                "energy_factor": 1.0,
-                "toll_cost": 0.0,
-                "risk_cost": 0.0,
-                "restricted_distance_km": 0.0,
-            }
+            return self._fallback_metrics(start, end, vehicle_max_speed_kmh)
+
+        cache_key = (
+            start_node,
+            end_node,
+            self._time_cache_key(start_time),
+            method,
+            self._speed_key(vehicle_max_speed_kmh),
+        )
+        if cache_key in self._road_metrics_cache:
+            return dict(self._road_metrics_cache[cache_key])
 
         try:
-            if method == "a_star":
-                def heuristic(node):
-                    _, loc = self._get_node_location(node)
-                    return loc.distance_to(end)
-
-                node_path = nx.astar_path(
-                    self.graph,
-                    start_node,
-                    end_node,
-                    heuristic=heuristic,
-                    weight="length_km",
-                )
-            else:
-                node_path = nx.dijkstra_path(self.graph, start_node, end_node, weight="length_km")
+            node_path = self._distance_path_node_ids(
+                start_node,
+                end_node,
+                method=method,
+                heuristic_target=end,
+            )
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            distance = start.distance_to(end)
-            return {
-                "distance_km": distance,
-                "time_hours": distance / max(1e-6, min(40.0, float(vehicle_max_speed_kmh or 40.0))),
-                "avg_speed_kmph": min(40.0, float(vehicle_max_speed_kmh or 40.0)),
-                "energy_factor": 1.0,
-                "toll_cost": 0.0,
-                "risk_cost": 0.0,
-                "restricted_distance_km": 0.0,
-            }
+            return self._fallback_metrics(start, end, vehicle_max_speed_kmh)
 
         total_distance = 0.0
         total_time = 0.0
@@ -482,7 +559,7 @@ class RoadNetwork:
                 restricted_distance += length
 
         avg_speed = total_distance / max(1e-6, total_time)
-        return {
+        metrics = {
             "distance_km": float(total_distance),
             "time_hours": float(total_time),
             "avg_speed_kmph": float(avg_speed),
@@ -491,42 +568,42 @@ class RoadNetwork:
             "risk_cost": float(risk_cost),
             "restricted_distance_km": float(restricted_distance),
         }
-    
+        self._road_metrics_cache[cache_key] = dict(metrics)
+        self._road_metrics_cache[(end_node, start_node, cache_key[2], method, cache_key[4])] = dict(metrics)
+        return metrics
+
     def _find_nearest_node(self, location: Location) -> Optional[str]:
-        """
-        找到距离给定位置最近的网络节点
-        
-        Args:
-            location: 查询位置
-            
-        Returns:
-            最近的节点ID或None
-        """
+        """Find the nearest road node with name and coordinate caches."""
         if not self.nodes:
             return None
-        
-        nearest_node = None
-        min_distance = float('inf')
-        
-        for node_id, node_location in self.nodes:
-            dist = location.distance_to(node_location)
-            if dist < min_distance:
-                min_distance = dist
-                nearest_node = node_id
-        
+        if location.name in self._node_location_map:
+            return location.name
+
+        cache_key = self._location_cache_key(location)
+        if cache_key in self._nearest_node_cache:
+            return self._nearest_node_cache[cache_key]
+
+        target = np.array([float(location.x), float(location.y)], dtype=float)
+        distances_sq = np.sum((self._node_xy - target) ** 2, axis=1)
+        nearest_idx = int(np.argmin(distances_sq))
+        nearest_node = self._node_ids[nearest_idx]
+        self._nearest_node_cache[cache_key] = nearest_node
         return nearest_node
-    
+
     def _get_node_location(self, node_id: str) -> Optional[Tuple[str, Location]]:
-        """
-        根据节点ID获取节点的位置信息
-        
-        Args:
-            node_id: 节点ID
-            
-        Returns:
-            (node_id, Location) 元组或None
-        """
-        for nid, loc in self.nodes:
-            if nid == node_id:
-                return (nid, loc)
-        return None
+        """Return a node location by id in O(1)."""
+        loc = self._node_location(node_id)
+        if loc is None:
+            return None
+        return (node_id, loc)
+
+    def cache_stats(self) -> Dict[str, int]:
+        """Expose lightweight cache sizes for profiling larger benchmark runs."""
+        return {
+            "nearest_node": len(self._nearest_node_cache),
+            "distance": len(self._distance_cache),
+            "distance_path": len(self._distance_path_cache),
+            "time_path": len(self._time_path_cache),
+            "time_length": len(self._time_length_cache),
+            "road_metrics": len(self._road_metrics_cache),
+        }

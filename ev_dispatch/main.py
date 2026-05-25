@@ -1,5 +1,6 @@
 import argparse
 from copy import deepcopy
+from datetime import datetime
 from typing import Dict, List, Tuple
 
 # 兼容直接运行: python ev_dispatch/main.py
@@ -17,9 +18,16 @@ from ev_dispatch.algorithms.strategies import (
     DispatcherNearestFirst,
 )
 from ev_dispatch.core.interfaces import SimulationFrame
-from ev_dispatch.scenarios.default import build_default_scenario, CargoConfig
-from ev_dispatch.simulator.simulator import Simulator
+from ev_dispatch.scenarios.default import CargoConfig, build_default_scenario
+from ev_dispatch.simulator.simulator import (
+    DEFAULT_SIMULATION_START_TIME,
+    Simulator,
+    parse_simulation_start_time,
+)
 from ev_dispatch.visualization.console import print_run_summary
+
+
+DEMO_RANDOM_SEED = 42
 
 
 def _run_strategy(
@@ -41,18 +49,20 @@ def run_demo(
     visualize_strategy: str = "nearest",
     save_animation: str = "",
     no_show: bool = False,
+    start_time: datetime = DEFAULT_SIMULATION_START_TIME,
 ) -> None:
     print("=" * 50)
     print("新能源物流车队协同调度系统 - 模块化演示")
     print("=" * 50)
 
-    network, vehicles, charging_stations = build_default_scenario()
+    network, vehicles, charging_stations = build_default_scenario(random_seed=DEMO_RANDOM_SEED)
 
     print("\n[初始化] 创建场景...")
     print(f"车队规模: {len(vehicles)} 辆车")
     print(f"充电站数: {len(charging_stations)} 个")
-    
-    # 创建货物类型配置
+    print(f"随机种子: {DEMO_RANDOM_SEED}")
+    print(f"仿真起始时间: {start_time.isoformat(sep=' ', timespec='seconds')}")
+
     cargo_config = CargoConfig(num_types=4, type_1_ratio=0.7)
 
     print("\n[策略1] 最近任务优先调度")
@@ -62,7 +72,8 @@ def run_demo(
         charging_stations=deepcopy(charging_stations),
         dispatcher=DispatcherNearestFirst(network),
         cargo_config=cargo_config,
-        random_seed=42,
+        random_seed=DEMO_RANDOM_SEED,
+        start_time=start_time,
         debug_run_id="pre",
     )
     results1, frames1 = _run_strategy(
@@ -86,7 +97,8 @@ def run_demo(
         charging_stations=deepcopy(charging_stations),
         dispatcher=DispatcherLargestFirst(network),
         cargo_config=cargo_config,
-        random_seed=42,
+        random_seed=DEMO_RANDOM_SEED,
+        start_time=start_time,
         debug_run_id="pre",
     )
     results2, frames2 = _run_strategy(
@@ -108,7 +120,8 @@ def run_demo(
         charging_stations=deepcopy(charging_stations),
         dispatcher=DispatcherCompositeScore(network),
         cargo_config=cargo_config,
-        random_seed=42,
+        random_seed=DEMO_RANDOM_SEED,
+        start_time=start_time,
         debug_run_id="pre",
     )
     results3, frames3 = _run_strategy(
@@ -153,7 +166,7 @@ def run_demo(
                 show_plot=not no_show,
             )
         except Exception as exc:
-            print("\n[可视化错误] Matplotlib 环境不可用，请检查 numpy/matplotlib 版本。")
+            print("\n[可视化错误] Matplotlib 渲染失败。")
             print(f"详细信息: {exc}")
             return
         if save_animation and out_file is not None:
@@ -166,6 +179,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="EV 动态调度演示入口")
     parser.add_argument("--steps", type=int, default=10, help="仿真步数")
     parser.add_argument("--tasks-per-step", type=int, default=3, help="每步新任务数")
+    parser.add_argument(
+        "--start-time",
+        default=DEFAULT_SIMULATION_START_TIME.isoformat(timespec="seconds"),
+        help="仿真起始时间，ISO 格式，例如 2026-01-01T08:00:00。",
+    )
     parser.add_argument("--visualize", action="store_true", help="启用 Matplotlib 动画")
     parser.add_argument(
         "--visualize-strategy",
@@ -176,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--save-animation",
         default="",
-        help="导出动画路径（.gif 或 .mp4）",
+        help="导出动画路径，例如 outputs/demo.gif 或 outputs/demo.mp4。",
     )
     parser.add_argument(
         "--no-show",
@@ -195,4 +213,5 @@ if __name__ == "__main__":
         visualize_strategy=args.visualize_strategy,
         save_animation=args.save_animation,
         no_show=args.no_show,
+        start_time=parse_simulation_start_time(args.start_time),
     )

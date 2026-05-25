@@ -1,8 +1,13 @@
 import argparse
+import cProfile
 import csv
 import json
 import os
+import pstats
 import statistics
+import time
+from datetime import datetime
+from io import StringIO
 from typing import Callable, Dict, Iterable, List, Sequence
 
 from ev_dispatch.algorithms.dispatcher import Dispatcher
@@ -18,7 +23,11 @@ from ev_dispatch.scenarios.city_scales import (
     list_city_scales,
 )
 from ev_dispatch.scenarios.default import CargoConfig
-from ev_dispatch.simulator.simulator import Simulator
+from ev_dispatch.simulator.simulator import (
+    DEFAULT_SIMULATION_START_TIME,
+    Simulator,
+    parse_simulation_start_time,
+)
 
 
 StrategyFactory = Callable[[object], Dispatcher]
@@ -79,6 +88,7 @@ def run_single_benchmark(
     num_steps: int = None,
     tasks_per_step: int = None,
     cargo_config: CargoConfig = None,
+    start_time: datetime = DEFAULT_SIMULATION_START_TIME,
 ) -> Dict[str, float]:
     network, vehicles, charging_stations, cfg = build_city_scale_scenario(
         scale=scale,
@@ -94,6 +104,7 @@ def run_single_benchmark(
         dispatcher=dispatcher,
         cargo_config=cargo_config or CargoConfig(),
         random_seed=seed,
+        start_time=start_time,
         debug_run_id=f"benchmark-{scale}-{strategy_name}-{seed}",
     )
     results = simulator.run_simulation(num_steps=steps, tasks_per_step=tasks)
@@ -106,6 +117,7 @@ def run_single_benchmark(
         "num_vehicles": len(vehicles),
         "num_stations": len(charging_stations),
         "num_nodes": len(network.nodes),
+        "start_time": start_time.isoformat(sep=" ", timespec="seconds"),
         **results,
     }
 
@@ -117,6 +129,7 @@ def run_benchmark_suite(
     num_steps: int = None,
     tasks_per_step: int = None,
     cargo_config: CargoConfig = None,
+    start_time: datetime = DEFAULT_SIMULATION_START_TIME,
 ) -> List[Dict[str, float]]:
     rows: List[Dict[str, float]] = []
     for scale in scales:
@@ -130,6 +143,7 @@ def run_benchmark_suite(
                         num_steps=num_steps,
                         tasks_per_step=tasks_per_step,
                         cargo_config=cargo_config,
+                        start_time=start_time,
                     )
                 )
     return rows
@@ -226,8 +240,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seeds", default="42,43,44", help="Comma-separated integer seeds.")
     parser.add_argument("--steps", type=int, default=None, help="Override scenario simulation steps.")
     parser.add_argument("--tasks-per-step", type=int, default=None, help="Override scenario task arrivals.")
+    parser.add_argument(
+        "--start-time",
+        default=DEFAULT_SIMULATION_START_TIME.isoformat(timespec="seconds"),
+        help="Simulation start time in ISO format, e.g. 2026-01-01T08:00:00.",
+    )
     parser.add_argument("--output-dir", default="outputs/benchmarks", help="Directory for CSV/JSON outputs.")
     parser.add_argument("--tag", default="latest", help="Output file tag.")
+    parser.add_argument("--profile", action="store_true", help="Print cProfile hotspots for the benchmark suite.")
+    parser.add_argument("--profile-top", type=int, default=20, help="Number of profiling rows to print.")
     return parser.parse_args()
 
 
@@ -236,6 +257,7 @@ def main() -> None:
     scales = _parse_csv_values(args.scales, str)
     strategies = _parse_csv_values(args.strategies, str)
     seeds = _parse_csv_values(args.seeds, int)
+    start_time = parse_simulation_start_time(args.start_time)
 
     unknown_scales = sorted(set(scales) - set(list_city_scales()))
     base_strategy_names = {strategy.split(":", 1)[0] for strategy in strategies}
@@ -255,14 +277,29 @@ def main() -> None:
             f"Available: {','.join(COMPOSITE_CONFIG_PRESETS.keys())}"
         )
 
-    rows = run_benchmark_suite(
-        scales=scales,
-        strategies=strategies,
-        seeds=seeds,
-        num_steps=args.steps,
-        tasks_per_step=args.tasks_per_step,
-        cargo_config=CargoConfig(num_types=4, type_1_ratio=0.7),
-    )
+    def _run_suite() -> List[Dict[str, float]]:
+        return run_benchmark_suite(
+            scales=scales,
+            strategies=strategies,
+            seeds=seeds,
+            num_steps=args.steps,
+            tasks_per_step=args.tasks_per_step,
+            cargo_config=CargoConfig(num_types=4, type_1_ratio=0.7),
+            start_time=start_time,
+        )
+
+    started_at = time.perf_counter()
+    if args.profile:
+        profiler = cProfile.Profile()
+        rows = profiler.runcall(_run_suite)
+        profile_stream = StringIO()
+        stats = pstats.Stats(profiler, stream=profile_stream).strip_dirs().sort_stats("cumtime")
+        stats.print_stats(max(1, int(args.profile_top)))
+        profile_output = profile_stream.getvalue()
+    else:
+        rows = _run_suite()
+        profile_output = ""
+    elapsed_seconds = time.perf_counter() - started_at
     summaries = summarize_runs(rows)
 
     csv_path = os.path.join(args.output_dir, f"runs_{args.tag}.csv")
@@ -283,6 +320,10 @@ def main() -> None:
     )
 
     print_summary_table(summaries)
+    print(f"\nElapsed seconds: {elapsed_seconds:.3f}")
+    if profile_output:
+        print("\n[Profile hotspots]")
+        print(profile_output.rstrip())
     print(f"\nWrote raw runs: {csv_path}")
     print(f"Wrote summary: {summary_csv_path}")
     print(f"Wrote JSON: {json_path}")

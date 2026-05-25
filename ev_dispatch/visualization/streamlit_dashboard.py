@@ -26,7 +26,7 @@ from ev_dispatch.algorithms.strategies import (
 )
 from ev_dispatch.core.interfaces import SimulationFrame
 from ev_dispatch.scenarios.default import CargoConfig, build_default_scenario
-from ev_dispatch.simulator.simulator import Simulator
+from ev_dispatch.simulator.simulator import DEFAULT_SIMULATION_START_TIME, Simulator
 
 
 SCENARIO_PRESETS: Dict[str, Dict[str, float]] = {
@@ -91,6 +91,7 @@ def _run_single_strategy(
         dispatcher=dispatcher,
         cargo_config=CargoConfig(num_types=4, type_1_ratio=0.7),
         random_seed=random_seed,
+        start_time=DEFAULT_SIMULATION_START_TIME,
         debug_run_id=f"streamlit-{strategy_name}-{random_seed}",
     )
     results = sim.run_simulation(num_steps=num_steps, tasks_per_step=tasks_per_step)

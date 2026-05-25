@@ -6,6 +6,7 @@ import json
 import os
 
 from ev_dispatch.algorithms.dispatcher import Dispatcher
+from ev_dispatch.core.assignment import estimate_task_assignment
 from ev_dispatch.core.charging import ChargingStation
 from ev_dispatch.core.energy import EnergyManager
 from ev_dispatch.core.interfaces import Action, SimulationFrame, SimulationState
@@ -15,6 +16,26 @@ from ev_dispatch.core.task import Task, CargoType
 from ev_dispatch.core.vehicle import VehicleStatus
 from ev_dispatch.core.vehicle import Vehicle
 from ev_dispatch.scenarios.default import CargoConfig
+
+
+DEFAULT_SIMULATION_START_TIME = datetime(2026, 1, 1, 8, 0, 0)
+
+
+def parse_simulation_start_time(raw: Optional[str]) -> datetime:
+    """Parse an ISO datetime, falling back to the reproducible default."""
+    if raw is None or not str(raw).strip():
+        return DEFAULT_SIMULATION_START_TIME
+
+    value = str(raw).strip()
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            "Invalid start time. Use ISO format, for example: 2026-01-01T08:00:00"
+        ) from exc
 
 
 class Simulator:
@@ -28,6 +49,7 @@ class Simulator:
         dispatcher: Dispatcher,
         cargo_config: CargoConfig = None,
         random_seed: Optional[int] = None,
+        start_time: Optional[datetime] = None,
         debug_run_id: str = "pre",
     ):
         self.network = network
@@ -40,7 +62,7 @@ class Simulator:
         self.debug_run_id = debug_run_id
         self._task_seq = 0
 
-        self.current_time = datetime.now()
+        self.current_time = start_time or DEFAULT_SIMULATION_START_TIME
         self.completed_tasks: List[Task] = []
         self.failed_tasks: List[Task] = []
         self.all_tasks: List[Task] = []
@@ -659,152 +681,39 @@ class Simulator:
         if vehicle.status != VehicleStatus.IDLE or vehicle.available_at is not None:
             return {"distance": 0.0, "score": 0.0, "time_hours": 0.0, "cost": 0.0}
 
-        # 路网距离与行驶时间（拥堵随当前时刻变化）
         depart_time = self.current_time
-        dist_to_pickup = self.network.shortest_distance(vehicle.position, task.origin, method="dijkstra")
-        pickup_road_metrics = self.network.path_road_metrics(
-            vehicle.position,
-            task.origin,
-            start_time=depart_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+        estimate = estimate_task_assignment(
+            network=self.network,
+            vehicle=vehicle,
+            task=task,
+            depart_time=depart_time,
+            include_paths=True,
         )
-        t_to_pickup = self.network.shortest_travel_time_hours(
-            vehicle.position,
-            task.origin,
-            start_time=depart_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-
-        # 近似：到达取货点后的时间 = depart_time + t_to_pickup（拥堵按到达时刻重新取一片）
-        arrive_pickup_time = depart_time + timedelta(hours=t_to_pickup)
-        transport_start_position = Location(vehicle.position.x, vehicle.position.y, vehicle.position.name)
-        pickup_path = self.network.shortest_path_locations(
-            transport_start_position,
-            task.origin,
-            method="dijkstra",
-        )
-        pickup_timed_path = self.network.timed_path_locations(
-            transport_start_position,
-            task.origin,
-            start_time=depart_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-            method="dijkstra",
-        )
-        dist_delivery = self.network.shortest_distance(task.origin, task.destination, method="dijkstra")
-        delivery_road_metrics = self.network.path_road_metrics(
-            task.origin,
-            task.destination,
-            start_time=arrive_pickup_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-        delivery_path = self.network.shortest_path_locations(
-            task.origin,
-            task.destination,
-            method="dijkstra",
-        )
-        delivery_timed_path = self.network.timed_path_locations(
-            task.origin,
-            task.destination,
-            start_time=arrive_pickup_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-            method="dijkstra",
-        )
-        t_delivery = self.network.shortest_travel_time_hours(
-            task.origin,
-            task.destination,
-            start_time=arrive_pickup_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-
-        dist = dist_to_pickup + dist_delivery
-        time_delta_hours = t_to_pickup + t_delivery
-        road_energy_factor = (
-            pickup_road_metrics["energy_factor"] * dist_to_pickup
-            + delivery_road_metrics["energy_factor"] * dist_delivery
-        ) / max(1e-9, dist)
-        avg_route_speed = dist / max(1e-9, time_delta_hours)
-        # Calculate energy considering vehicle's current speed
-        energy_used = EnergyManager.calculate_consumption(
-            distance=dist,
-            load=task.weight,
-            speed_kmh=avg_route_speed,
-            efficiency=vehicle.efficiency,
-            weather_factor=road_energy_factor,
-        )
-        distance_delta += dist
-
-        # 运输费用模型（参与评分体系）
-        # - 路程成本：按公里计费
-        # - 重量成本：按 kg*km 计费（越重越贵）
-        # - 车型成本：普通车最便宜（这里用 Standard 作为“普通车”）
-        # - 额外建议：能耗成本（按 kWh 折算成本），更贴近新能源车队
-        base_cost_per_km = 1.0
-        weight_cost_per_kg_km = 0.002
-        energy_cost_per_kwh = 0.8
-        vehicle_cost_multiplier = {
-            "compact": 1.10,
-            "standard": 1.00,  # 普通车最便宜
-            "large": 1.25,
-        }
-        vt = (vehicle.vehicle_type.name or "").strip().lower()
-        vt_key = "standard"
-        if "compact" in vt:
-            vt_key = "compact"
-        elif "large" in vt:
-            vt_key = "large"
-        elif "standard" in vt:
-            vt_key = "standard"
-        mult = float(vehicle_cost_multiplier.get(vt_key, 1.10))
-
-        distance_cost = dist * base_cost_per_km
-        weight_cost = dist * task.weight * weight_cost_per_kg_km
-        energy_cost = energy_used * energy_cost_per_kwh
-        road_cost = (
-            pickup_road_metrics["toll_cost"]
-            + delivery_road_metrics["toll_cost"]
-            + pickup_road_metrics["risk_cost"]
-            + delivery_road_metrics["risk_cost"]
-        )
-        restriction_penalty = (
-            pickup_road_metrics["restricted_distance_km"]
-            + delivery_road_metrics["restricted_distance_km"]
-        ) * 2.0
-        cost_delta = (distance_cost + weight_cost + energy_cost + road_cost + restriction_penalty) * mult
-
-        # 检查：车辆是否支持该货物类型
-        cargo_type = getattr(task.cargo_type, "value", task.cargo_type)
-        if cargo_type not in vehicle.supported_cargo_types:
-            self._mark_task_failed(task, "cargo_type_mismatch")
-            score_delta -= 50  # 货物类型不匹配，任务失败
-            return {"distance": 0.0, "score": score_delta, "time_hours": 0.0, "cost": 0.0}
-        
-        # 检查：车辆是否有足够的电量和容量
-        if energy_used <= vehicle.current_battery and vehicle.can_carry_task(task.weight, task.volume, cargo_type):
-            vehicle.current_battery -= energy_used
-            vehicle.current_load += task.weight
-            vehicle.current_volume += task.volume
-            vehicle.current_tasks.append(task.id)
-            vehicle.available_at = depart_time + timedelta(hours=time_delta_hours)
-            vehicle.status = VehicleStatus.EN_ROUTE
-            task.assigned_vehicles.append(vehicle.id)
-            task.start_transport_time = depart_time
-            task.transport_start_position = transport_start_position
-            task.planned_pickup_time = arrive_pickup_time
-            task.planned_completion_time = vehicle.available_at
-            task.pickup_path = pickup_path
-            task.delivery_path = delivery_path
-            task.pickup_timed_path = pickup_timed_path
-            task.delivery_timed_path = delivery_timed_path
-            task.planned_distance = distance_delta
-            task.planned_time_hours = time_delta_hours
-            task.planned_cost = cost_delta
-            # 简单收益：路程越短越好 + 时间越短越好
-            score_delta += 100 - (dist * 0.1) - (time_delta_hours * 2.0) - cost_delta
-            task.planned_score = score_delta
-        else:
-            self._mark_task_failed(task, "capacity_or_energy_insufficient")
+        if not estimate.feasible:
+            self._mark_task_failed(task, estimate.reason)
             score_delta -= 50
             return {"distance": 0.0, "score": score_delta, "time_hours": 0.0, "cost": 0.0}
+
+        vehicle.current_battery -= estimate.energy_used
+        vehicle.current_load += task.weight
+        vehicle.current_volume += task.volume
+        vehicle.current_tasks.append(task.id)
+        vehicle.available_at = estimate.planned_completion_time
+        vehicle.status = VehicleStatus.EN_ROUTE
+        task.assigned_vehicles.append(vehicle.id)
+        task.start_transport_time = depart_time
+        task.transport_start_position = estimate.transport_start_position
+        task.planned_pickup_time = estimate.planned_pickup_time
+        task.planned_completion_time = vehicle.available_at
+        task.pickup_path = estimate.pickup_path
+        task.delivery_path = estimate.delivery_path
+        task.pickup_timed_path = estimate.pickup_timed_path
+        task.delivery_timed_path = estimate.delivery_timed_path
+        task.planned_distance = estimate.total_distance
+        task.planned_time_hours = estimate.total_hours
+        task.planned_cost = estimate.cost
+        score_delta += estimate.execution_score
+        task.planned_score = score_delta
 
         return {"distance": 0.0, "score": 0.0, "time_hours": 0.0, "cost": 0.0}
 

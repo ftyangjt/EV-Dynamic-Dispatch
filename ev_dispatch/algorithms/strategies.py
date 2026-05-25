@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import List, Optional, Tuple
 
 from ev_dispatch.algorithms.dispatcher import Dispatcher
+from ev_dispatch.core.assignment import AssignmentEstimate, estimate_task_assignment
 from ev_dispatch.core.interfaces import Action, SimulationState
 from ev_dispatch.core.energy import EnergyManager
 from ev_dispatch.core.vehicle import VehicleStatus
@@ -116,6 +116,7 @@ class DispatcherNearestFirst(Dispatcher):
 
         unassigned_tasks = list(state.pending_tasks)
         planned_loads = {v.id: v.current_load for v in state.vehicles}
+        planned_volumes = {v.id: v.current_volume for v in state.vehicles}
         available_vehicles = [
             v
             for v in state.vehicles
@@ -133,12 +134,17 @@ class DispatcherNearestFirst(Dispatcher):
 
             for vehicle in available_vehicles:
                 for task in unassigned_tasks:
-                    available_capacity = vehicle.load_capacity - planned_loads[vehicle.id]
-                    if available_capacity >= task.weight:
-                        dist = state.network.shortest_distance(vehicle.position, task.origin)
-                        if dist < best_distance:
-                            best_distance = dist
-                            best_assignment = (vehicle, task)
+                    estimate = estimate_task_assignment(
+                        network=state.network,
+                        vehicle=vehicle,
+                        task=task,
+                        depart_time=state.current_time,
+                        planned_load=planned_loads[vehicle.id],
+                        planned_volume=planned_volumes[vehicle.id],
+                    )
+                    if estimate.feasible and estimate.pickup_distance < best_distance:
+                        best_distance = estimate.pickup_distance
+                        best_assignment = (vehicle, task)
 
             if best_assignment is None:
                 break
@@ -154,6 +160,7 @@ class DispatcherNearestFirst(Dispatcher):
             )
             unassigned_tasks.remove(task)
             planned_loads[vehicle.id] += task.weight
+            planned_volumes[vehicle.id] += task.volume
             available_vehicles.remove(vehicle)
 
         return actions
@@ -217,6 +224,7 @@ class DispatcherLargestFirst(Dispatcher):
                 vehicles_to_charge.add(v.id)
 
         planned_loads = {v.id: v.current_load for v in state.vehicles}
+        planned_volumes = {v.id: v.current_volume for v in state.vehicles}
         sorted_tasks = sorted(state.pending_tasks, key=lambda t: t.weight, reverse=True)
 
         for task in sorted_tasks:
@@ -226,15 +234,17 @@ class DispatcherLargestFirst(Dispatcher):
             for vehicle in state.vehicles:
                 if vehicle.id in vehicles_to_charge or vehicle.status != VehicleStatus.IDLE:
                     continue
-                available_capacity = vehicle.load_capacity - planned_loads[vehicle.id]
-                if (
-                    available_capacity >= task.weight
-                    and vehicle.can_reach(task.origin, network=state.network)
-                ):
-                    dist = state.network.shortest_distance(vehicle.position, task.origin)
-                    if dist < best_distance:
-                        best_distance = dist
-                        best_vehicle = vehicle
+                estimate = estimate_task_assignment(
+                    network=state.network,
+                    vehicle=vehicle,
+                    task=task,
+                    depart_time=state.current_time,
+                    planned_load=planned_loads[vehicle.id],
+                    planned_volume=planned_volumes[vehicle.id],
+                )
+                if estimate.feasible and estimate.pickup_distance < best_distance:
+                    best_distance = estimate.pickup_distance
+                    best_vehicle = vehicle
 
             if best_vehicle is not None:
                 actions.append(
@@ -246,6 +256,7 @@ class DispatcherLargestFirst(Dispatcher):
                     )
                 )
                 planned_loads[best_vehicle.id] += task.weight
+                planned_volumes[best_vehicle.id] += task.volume
                 sorted_tasks = [t for t in sorted_tasks if t.id != task.id]
                 vehicles_to_charge.add(best_vehicle.id)
 
@@ -289,87 +300,29 @@ class DispatcherCompositeScore(Dispatcher):
         task,
         planned_load: float,
         planned_volume: float,
-    ) -> Optional[Tuple[float, dict]]:
-        cargo_type = getattr(task.cargo_type, "value", task.cargo_type)
-        if cargo_type not in vehicle.supported_cargo_types:
-            return None
-        if planned_load + task.weight > vehicle.load_capacity:
-            return None
-        if planned_volume + task.volume > vehicle.volume_capacity:
-            return None
-
-        pickup_distance = state.network.shortest_distance(vehicle.position, task.origin)
-        delivery_distance = state.network.shortest_distance(task.origin, task.destination)
-        depart_time = state.current_time
-        pickup_hours = state.network.shortest_travel_time_hours(
-            vehicle.position,
-            task.origin,
-            start_time=depart_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-        delivery_hours = state.network.shortest_travel_time_hours(
-            task.origin,
-            task.destination,
-            start_time=depart_time + timedelta(hours=pickup_hours),
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-        total_distance = pickup_distance + delivery_distance
-        total_hours = pickup_hours + delivery_hours
-        pickup_road_metrics = state.network.path_road_metrics(
-            vehicle.position,
-            task.origin,
-            start_time=depart_time,
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-        delivery_road_metrics = state.network.path_road_metrics(
-            task.origin,
-            task.destination,
-            start_time=depart_time + timedelta(hours=pickup_hours),
-            vehicle_max_speed_kmh=vehicle.max_speed_kmh,
-        )
-        road_energy_factor = (
-            pickup_road_metrics["energy_factor"] * pickup_distance
-            + delivery_road_metrics["energy_factor"] * delivery_distance
-        ) / max(1e-9, total_distance)
-        avg_route_speed = total_distance / max(1e-9, total_hours)
-        energy = EnergyManager.calculate_consumption(
-            distance=total_distance,
-            load=task.weight,
-            speed_kmh=avg_route_speed,
-            efficiency=vehicle.efficiency,
-            weather_factor=road_energy_factor,
-        )
-
+    ) -> Optional[Tuple[float, AssignmentEstimate]]:
         nearest_station = self._nearest_station_for(state, vehicle)
-        station_distance_after_delivery = 0.0
-        station_wait_hours = 0.0
-        energy_to_station = 0.0
-        if nearest_station is not None:
-            station_distance_after_delivery = state.network.shortest_distance(
-                task.destination,
-                nearest_station.position,
-            )
-            station_wait_hours = nearest_station.get_wait_time() / 60.0
-            energy_to_station = EnergyManager.calculate_consumption(
-                distance=station_distance_after_delivery,
-                load=0.0,
-                speed_kmh=vehicle.current_speed_kmh,
-                efficiency=vehicle.efficiency,
-            )
-
         cfg = self.config
-        required_energy = energy + energy_to_station + cfg.reserve_energy_kwh
-        if required_energy > vehicle.current_battery:
+        estimate = estimate_task_assignment(
+            network=state.network,
+            vehicle=vehicle,
+            task=task,
+            depart_time=state.current_time,
+            planned_load=planned_load,
+            planned_volume=planned_volume,
+            reserve_energy_kwh=cfg.reserve_energy_kwh,
+            station_after_delivery=nearest_station,
+        )
+        if not estimate.feasible:
             return None
 
-        completion_time = depart_time + timedelta(hours=total_hours)
-        slack_hours = (task.deadline - completion_time).total_seconds() / 3600.0
+        slack_hours = (task.deadline - estimate.planned_completion_time).total_seconds() / 3600.0
         lateness_hours = max(0.0, -slack_hours)
         urgency_bonus = 1.0 / max(
             cfg.urgency_floor_hours,
             max(0.0, slack_hours) + cfg.urgency_floor_hours,
         )
-        battery_after_ratio = (vehicle.current_battery - energy) / max(1e-9, vehicle.battery_capacity)
+        battery_after_ratio = (vehicle.current_battery - estimate.energy_used) / max(1e-9, vehicle.battery_capacity)
         load_fit = task.weight / max(1e-9, vehicle.load_capacity)
         volume_fit = task.volume / max(1e-9, vehicle.volume_capacity)
 
@@ -378,24 +331,18 @@ class DispatcherCompositeScore(Dispatcher):
             + task.priority * cfg.priority_weight
             + urgency_bonus * cfg.urgency_weight
             + max(load_fit, volume_fit) * cfg.load_fit_weight
-            - pickup_distance * cfg.pickup_distance_weight
-            - delivery_distance * cfg.delivery_distance_weight
-            - total_hours * cfg.travel_time_weight
-            - energy * cfg.energy_weight
+            - estimate.pickup_distance * cfg.pickup_distance_weight
+            - estimate.delivery_distance * cfg.delivery_distance_weight
+            - estimate.total_hours * cfg.travel_time_weight
+            - estimate.energy_used * cfg.energy_weight
             - lateness_hours * cfg.lateness_weight
-            - station_wait_hours * cfg.station_wait_weight
-            - station_distance_after_delivery * cfg.station_distance_weight
+            - estimate.station_wait_hours * cfg.station_wait_weight
+            - estimate.station_distance_after_delivery * cfg.station_distance_weight
             - max(0.0, cfg.low_battery_ratio_threshold - battery_after_ratio)
             * cfg.low_battery_penalty_weight
         )
 
-        return score, {
-            "energy": energy,
-            "pickup_distance": pickup_distance,
-            "delivery_distance": delivery_distance,
-            "total_hours": total_hours,
-            "slack_hours": slack_hours,
-        }
+        return score, estimate
 
     def generate_actions(self, state: SimulationState) -> List[Action]:
         actions: List[Action] = []
@@ -440,10 +387,10 @@ class DispatcherCompositeScore(Dispatcher):
                     )
                     if estimate is None:
                         continue
-                    score, details = estimate
+                    score, assignment_estimate = estimate
                     if score > best_score:
                         best_score = score
-                        best_assignment = (vehicle, task, details)
+                        best_assignment = (vehicle, task, assignment_estimate)
 
             if best_assignment is None:
                 break
