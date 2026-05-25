@@ -149,6 +149,25 @@ class Simulator:
 
         return (path[-1].x, path[-1].y)
 
+    def _path_position_at_distance(self, path: List[Location], target_distance: float) -> tuple:
+        if not path:
+            return (0.0, 0.0)
+        if len(path) == 1:
+            return (path[0].x, path[0].y)
+
+        target_distance = max(0.0, float(target_distance))
+        covered = 0.0
+        for i in range(len(path) - 1):
+            segment_length = path[i].distance_to(path[i + 1])
+            if segment_length <= 1e-9:
+                continue
+            if covered + segment_length >= target_distance:
+                local_ratio = (target_distance - covered) / segment_length
+                return self._interpolate_position(path[i], path[i + 1], local_ratio)
+            covered += segment_length
+
+        return (path[-1].x, path[-1].y)
+
     def _interpolate_timed_path_position(self, timed_path: List[tuple], elapsed_hours: float) -> tuple:
         if not timed_path:
             return (0.0, 0.0)
@@ -190,29 +209,209 @@ class Simulator:
             return (vehicle.position.x, vehicle.position.y)
 
         now = display_time or self.current_time
+        _phase, route, route_progress, _route_length = self._vehicle_phase_route_progress(vehicle, now)
+        route_locations = [
+            Location(float(point["x"]), float(point["y"]), str(point.get("name") or ""))
+            for point in route
+            if point is not None
+        ]
+        if route_locations:
+            return self._path_position_at_distance(route_locations, route_progress)
+
         if now <= task.start_transport_time:
             return (task.transport_start_position.x, task.transport_start_position.y)
         if now >= task.planned_completion_time:
             return (task.destination.x, task.destination.y)
+        return (vehicle.position.x, vehicle.position.y)
+
+    @staticmethod
+    def _location_snapshot(location: Optional[Location]) -> Optional[Dict[str, object]]:
+        if location is None:
+            return None
+        return {
+            "name": location.name,
+            "x": float(location.x),
+            "y": float(location.y),
+        }
+
+    @classmethod
+    def _path_snapshot(cls, path: List[Location]) -> List[Dict[str, object]]:
+        return [cls._location_snapshot(loc) for loc in path if loc is not None]
+
+    @classmethod
+    def _combine_paths(cls, *paths: List[Location]) -> List[Location]:
+        combined: List[Location] = []
+        for path in paths:
+            for loc in path or []:
+                if loc is None:
+                    continue
+                if combined and combined[-1].distance_to(loc) <= 1e-9:
+                    continue
+                combined.append(loc)
+        return combined
+
+    @classmethod
+    def _combine_path_snapshot(cls, *paths: List[Location]) -> List[Dict[str, object]]:
+        combined = cls._combine_paths(*paths)
+        return cls._path_snapshot(combined)
+
+    @staticmethod
+    def _path_length(path: List[Location]) -> float:
+        if not path or len(path) < 2:
+            return 0.0
+        return float(sum(path[i].distance_to(path[i + 1]) for i in range(len(path) - 1)))
+
+    def _timed_path_progress(self, timed_path: List[tuple], elapsed_hours: float) -> float:
+        if not timed_path or len(timed_path) < 2:
+            return 0.0
+
+        elapsed_hours = max(0.0, float(elapsed_hours))
+        progress = 0.0
+        for index in range(1, len(timed_path)):
+            prev_loc, prev_hours = timed_path[index - 1]
+            next_loc, next_hours = timed_path[index]
+            segment_length = prev_loc.distance_to(next_loc)
+            prev_hours = float(prev_hours)
+            next_hours = float(next_hours)
+            if elapsed_hours <= next_hours:
+                segment_hours = max(1e-9, next_hours - prev_hours)
+                local_ratio = max(0.0, min(1.0, (elapsed_hours - prev_hours) / segment_hours))
+                return float(progress + segment_length * local_ratio)
+            progress += segment_length
+
+        return float(progress)
+
+    def _task_status(self, task: Task) -> str:
+        if task.completed:
+            return "completed"
+        if task.failed:
+            return "failed"
+        if task.assigned_vehicles:
+            return "in_progress"
+        return "pending"
+
+    def _vehicle_phase_route_progress(self, vehicle: Vehicle, display_time: datetime) -> tuple:
+        if vehicle.status == VehicleStatus.CHARGING:
+            return "charging", [], 0.0, 0.0
+        if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED) or not vehicle.current_tasks:
+            return "idle", [], 0.0, 0.0
+
+        task = next((t for t in self.all_tasks if t.id == vehicle.current_tasks[0]), None)
+        if (
+            task is None
+            or task.transport_start_position is None
+            or task.start_transport_time is None
+            or task.planned_completion_time is None
+        ):
+            return vehicle.status.value, [], 0.0, 0.0
 
         pickup_time = task.planned_pickup_time or task.start_transport_time
-        if now <= pickup_time and pickup_time > task.start_transport_time:
-            elapsed = (now - task.start_transport_time).total_seconds()
-            duration = (pickup_time - task.start_transport_time).total_seconds()
+        pickup_path = task.pickup_path or [task.transport_start_position, task.origin]
+        delivery_path = task.delivery_path or [task.origin, task.destination]
+        full_route_locations = self._combine_paths(pickup_path, delivery_path)
+        full_route = self._path_snapshot(full_route_locations)
+        route_length = self._path_length(full_route_locations)
+        pickup_length = self._path_length(pickup_path)
+        delivery_length = self._path_length(delivery_path)
+
+        if display_time <= task.start_transport_time:
+            return "to_pickup", full_route, 0.0, route_length
+        if display_time >= task.planned_completion_time:
+            return "to_delivery", full_route, route_length, route_length
+
+        if pickup_time is not None and display_time < pickup_time:
+            elapsed = (display_time - task.start_transport_time).total_seconds() / 3600.0
             if task.pickup_timed_path:
-                return self._interpolate_timed_path_position(task.pickup_timed_path, elapsed / 3600.0)
-            path = task.pickup_path or [task.transport_start_position, task.origin]
-            return self._interpolate_path_position(path, elapsed / duration)
+                progress = self._timed_path_progress(task.pickup_timed_path, elapsed)
+            else:
+                duration_hours = max(1e-9, (pickup_time - task.start_transport_time).total_seconds() / 3600.0)
+                progress = pickup_length * max(0.0, min(1.0, elapsed / duration_hours))
+            return "to_pickup", full_route, min(progress, route_length), route_length
 
         delivery_start = max(pickup_time, task.start_transport_time)
-        elapsed = (now - delivery_start).total_seconds()
-        duration = (task.planned_completion_time - delivery_start).total_seconds()
-        if duration <= 0:
-            return (task.destination.x, task.destination.y)
+        elapsed = (display_time - delivery_start).total_seconds() / 3600.0
         if task.delivery_timed_path:
-            return self._interpolate_timed_path_position(task.delivery_timed_path, elapsed / 3600.0)
-        path = task.delivery_path or [task.origin, task.destination]
-        return self._interpolate_path_position(path, elapsed / duration)
+            delivery_progress = self._timed_path_progress(task.delivery_timed_path, elapsed)
+        else:
+            duration_hours = max(1e-9, (task.planned_completion_time - delivery_start).total_seconds() / 3600.0)
+            delivery_progress = delivery_length * max(0.0, min(1.0, elapsed / duration_hours))
+        progress = pickup_length + delivery_progress
+        return "to_delivery", full_route, min(progress, route_length), route_length
+
+    def _vehicle_snapshot(self, vehicle: Vehicle, display_time: datetime) -> Dict[str, object]:
+        phase, route, route_progress, route_length = self._vehicle_phase_route_progress(vehicle, display_time)
+        return {
+            "id": vehicle.id,
+            "type": vehicle.vehicle_type.name,
+            "status": vehicle.status.value,
+            "phase": phase,
+            "battery": float(vehicle.current_battery),
+            "battery_capacity": float(vehicle.battery_capacity),
+            "battery_ratio": float(vehicle.current_battery) / max(1e-9, float(vehicle.battery_capacity)),
+            "min_battery_threshold": float(vehicle.min_battery_threshold),
+            "current_load": float(vehicle.current_load),
+            "load_capacity": float(vehicle.load_capacity),
+            "current_volume": float(vehicle.current_volume),
+            "volume_capacity": float(vehicle.volume_capacity),
+            "max_speed_kmh": float(vehicle.max_speed_kmh),
+            "current_tasks": list(vehicle.current_tasks),
+            "available_at": vehicle.available_at.isoformat() if vehicle.available_at else None,
+            "supported_cargo_types": sorted(vehicle.supported_cargo_types),
+            "charging_station_id": vehicle.charging_station_id,
+            "charging_duration": float(vehicle.charging_duration),
+            "target_battery": float(vehicle.target_battery),
+            "route": route,
+            "route_progress": float(route_progress),
+            "route_length": float(route_length),
+        }
+
+    def _task_snapshot(self, task: Task) -> Dict[str, object]:
+        cargo_type = getattr(task.cargo_type, "value", task.cargo_type)
+        return {
+            "id": task.id,
+            "status": self._task_status(task),
+            "origin": self._location_snapshot(task.origin),
+            "destination": self._location_snapshot(task.destination),
+            "weight": float(task.weight),
+            "volume": float(task.volume),
+            "cargo_type": cargo_type,
+            "priority": float(task.priority),
+            "created_time": task.created_time.isoformat(),
+            "deadline": task.deadline.isoformat(),
+            "assigned_vehicles": list(task.assigned_vehicles),
+            "start_transport_time": task.start_transport_time.isoformat() if task.start_transport_time else None,
+            "planned_pickup_time": task.planned_pickup_time.isoformat() if task.planned_pickup_time else None,
+            "planned_completion_time": task.planned_completion_time.isoformat() if task.planned_completion_time else None,
+            "completed_time": task.completed_time.isoformat() if task.completed_time else None,
+            "failed_time": task.failed_time.isoformat() if task.failed_time else None,
+            "failure_reason": task.failure_reason,
+            "planned_distance": float(task.planned_distance),
+            "planned_time_hours": float(task.planned_time_hours),
+            "planned_cost": float(task.planned_cost),
+            "planned_score": float(task.planned_score),
+            "pickup_path": self._path_snapshot(task.pickup_path),
+            "delivery_path": self._path_snapshot(task.delivery_path),
+        }
+
+    def _station_snapshot(self, station: ChargingStation) -> Dict[str, object]:
+        status = station.get_status()
+        return {
+            "id": station.id,
+            "position": self._location_snapshot(station.position),
+            "num_chargers": int(station.num_chargers),
+            "charging_power": float(station.charging_power),
+            "waiting_queue": list(station.waiting_queue),
+            "charging_vehicles": {
+                vid: {
+                    "start_time": rec.start_time.isoformat(),
+                    "duration_minutes": float(rec.duration_minutes),
+                    "target_energy": float(rec.target_energy),
+                    "end_time": rec.end_time.isoformat() if rec.end_time else None,
+                }
+                for vid, rec in station.charging_vehicles.items()
+            },
+            **status,
+        }
 
     # #region agent log
     def _dbg(self, hypothesisId: str, location: str, message: str, data: dict) -> None:
@@ -327,6 +526,9 @@ class Simulator:
             pending_task_ids=[t.id for t in pending_tasks],
             completed_task_ids=[t.id for t in self.completed_tasks],
             failed_task_ids=[t.id for t in self.failed_tasks],
+            vehicle_details={v.id: self._vehicle_snapshot(v, display_time) for v in self.vehicles},
+            task_details={t.id: self._task_snapshot(t) for t in self.all_tasks},
+            station_details={s.id: self._station_snapshot(s) for s in self.charging_stations},
         )
 
     def _find_station(self, station_id: str) -> Optional[ChargingStation]:
@@ -771,7 +973,7 @@ class Simulator:
                 for t in self.all_tasks
                 if not t.completed and not t.failed and not t.assigned_vehicles
             ]
-            for substep in range(1, 4):
+            for substep in range(0, 4):
                 frame_time = self.current_time + timedelta(hours=substep / 4)
                 self.frames.append(
                     self._build_frame(
@@ -793,7 +995,13 @@ class Simulator:
                 for t in self.all_tasks
                 if not t.completed and not t.failed and not t.assigned_vehicles
             ]
-            self.frames.append(self._build_frame(step=step, pending_tasks=pending))
+            self.frames.append(
+                self._build_frame(
+                    step=step,
+                    pending_tasks=pending,
+                    frame_time=self.current_time,
+                )
+            )
 
         return self._build_results(
             total_generated=total_generated,

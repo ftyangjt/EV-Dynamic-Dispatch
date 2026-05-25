@@ -55,6 +55,9 @@ class SimulationFrame:
     pending_task_ids: List[str]
     completed_task_ids: List[str]
     failed_task_ids: List[str]
+    vehicle_details: Dict[str, Dict[str, Any]] = None
+    task_details: Dict[str, Dict[str, Any]] = None
+    station_details: Dict[str, Dict[str, Any]] = None
 
 
 class AbstractDispatcher(abc.ABC):
