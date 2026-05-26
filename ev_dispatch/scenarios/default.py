@@ -116,29 +116,62 @@ def build_default_scenario(
         )
 
     # 充电站分散放在网络的不同节点上
-    # 选择均匀分布的节点位置
-    num_network_nodes = len(network.nodes)
+    # 在网格上均匀分布，避免对角线或聚集问题
+    grid_size = int(np.sqrt(len(network.nodes)))
     station_profiles = [
         {"num_chargers": 4, "charging_power": 120.0},
         {"num_chargers": 3, "charging_power": 90.0},
         {"num_chargers": 2, "charging_power": 60.0},
     ]
     charging_stations: List[ChargingStation] = []
-    for i in range(min(num_stations, num_network_nodes)):
+    
+    # 在网格坐标上选择充电站位置（基于网格坐标的均匀分布）
+    rng_local = np.random.default_rng(random_seed)
+    selected_grid_coords = []
+    
+    # 策略：根据网格大小均匀分割，选择代表点
+    if grid_size >= 1:
+        # 将网格分成 num_stations 个区域，从每个区域选择一个点
+        cells_per_station = grid_size / np.sqrt(min(num_stations, grid_size * grid_size))
+        idx = 0
+        for si in range(int(np.ceil(np.sqrt(min(num_stations, grid_size * grid_size))))):
+            for sj in range(int(np.ceil(np.sqrt(min(num_stations, grid_size * grid_size))))):
+                if idx >= num_stations:
+                    break
+                # 从这个区域内随机选择一个网格点
+                i_min = int(si * cells_per_station)
+                i_max = int((si + 1) * cells_per_station)
+                j_min = int(sj * cells_per_station)
+                j_max = int((sj + 1) * cells_per_station)
+                
+                i_min = min(max(0, i_min), grid_size - 1)
+                i_max = min(max(1, i_max), grid_size)
+                j_min = min(max(0, j_min), grid_size - 1)
+                j_max = min(max(1, j_max), grid_size)
+                
+                if i_min < i_max and j_min < j_max:
+                    selected_i = int(rng_local.integers(i_min, i_max))
+                    selected_j = int(rng_local.integers(j_min, j_max))
+                    grid_idx = selected_i * grid_size + selected_j
+                    if grid_idx < len(network.nodes) and (selected_i, selected_j) not in selected_grid_coords:
+                        selected_grid_coords.append((selected_i, selected_j))
+                        idx += 1
+            if idx >= num_stations:
+                break
+    
+    for i, (grid_i, grid_j) in enumerate(selected_grid_coords):
         profile = station_profiles[i % len(station_profiles)]
-        # 均匀分布：从第1个节点开始，每隔 num_network_nodes/num_stations 个节点选一个
-        node_idx = int((i + 1) * (num_network_nodes / (num_stations + 1)))
-        node_idx = min(node_idx, num_network_nodes - 1)
-        
-        station_node_id, station_location = network.nodes[node_idx]
-        
-        charging_stations.append(
-            ChargingStation(
-                id=f"station_{i}",
-                position=station_location,  # 使用网络节点的位置
-                num_chargers=int(profile["num_chargers"]),
-                charging_power=float(profile["charging_power"]),
+        node_idx = grid_i * grid_size + grid_j
+        if node_idx < len(network.nodes):
+            station_node_id, station_location = network.nodes[node_idx]
+            
+            charging_stations.append(
+                ChargingStation(
+                    id=f"station_{i}",
+                    position=station_location,  # 使用网络节点的位置
+                    num_chargers=int(profile["num_chargers"]),
+                    charging_power=float(profile["charging_power"]),
+                )
             )
-        )
 
     return network, vehicles, charging_stations
