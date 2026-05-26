@@ -16,7 +16,6 @@ if __package__ is None or __package__ == "":
 
 import numpy as np
 import streamlit as st
-import streamlit.components.v1 as components
 
 from ev_dispatch.algorithms.strategies import (
     COMPOSITE_CONFIG_PRESETS,
@@ -134,6 +133,16 @@ def _fmt_time(value: object) -> str:
         date_part, time_part = text.split("T", 1)
         return f"{date_part} {time_part[:8]}"
     return text
+
+
+def _render_embedded_html(html: str, height: int = 700) -> None:
+    if hasattr(st, "iframe"):
+        st.iframe(html, width="stretch", height=height)
+        return
+
+    import streamlit.components.v1 as components
+
+    components.html(html, height=height, scrolling=False)
 
 
 def _build_road_rows(network: object, current_time) -> List[Dict[str, object]]:
@@ -293,7 +302,7 @@ def _render_game_scene(payload: Dict[str, object], autoplay: bool, fps: int, foc
     progress_max = max(0, frame_count - 1)
     initial_frame_label = f"1 / {frame_count}" if frame_count else "0 / 0"
 
-    components.html(
+    _render_embedded_html(
         f"""
 <div id="ev-game-root">
   <style>
@@ -1173,7 +1182,6 @@ def _render_game_scene(payload: Dict[str, object], autoplay: bool, fps: int, foc
 </div>
         """,
         height=700,
-        scrolling=False,
     )
 
 
@@ -1260,7 +1268,7 @@ def main() -> None:
         st.divider()
         animation_fps = st.slider("车辆移速", min_value=1, max_value=12, value=4)
         st.caption("播放时会等车辆移动到下一帧目标后再推进；这里控制车辆图标移动速度。")
-        run_clicked = st.button("一键运行", type="primary", use_container_width=True)
+        run_clicked = st.button("一键运行", type="primary", width="stretch")
 
     if "dashboard_runs" not in st.session_state:
         st.session_state.dashboard_runs = {}
@@ -1407,7 +1415,7 @@ def main() -> None:
     st.subheader("对象详情")
     tabs = st.tabs(["车辆", "任务列表", "道路信息", "充电站", "原始帧数据"])
     with tabs[0]:
-        st.dataframe(_vehicle_rows(frame), use_container_width=True, hide_index=True)
+        st.dataframe(_vehicle_rows(frame), width="stretch", hide_index=True)
     with tabs[1]:
         task_rows = _task_rows(frame)
         status_filter = st.multiselect(
@@ -1416,11 +1424,11 @@ def main() -> None:
             default=["pending", "in_progress", "completed", "failed"],
         )
         filtered_tasks = [row for row in task_rows if row["状态"] in status_filter]
-        st.dataframe(filtered_tasks, use_container_width=True, hide_index=True)
+        st.dataframe(filtered_tasks, width="stretch", hide_index=True)
     with tabs[2]:
-        st.dataframe(road_rows, use_container_width=True, hide_index=True)
+        st.dataframe(road_rows, width="stretch", hide_index=True)
     with tabs[3]:
-        st.dataframe(_station_rows(frame), use_container_width=True, hide_index=True)
+        st.dataframe(_station_rows(frame), width="stretch", hide_index=True)
     with tabs[4]:
         st.json(
             {
