@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from ev_dispatch.core.network import RoadNetwork
 from ev_dispatch.core.task import Task
+from ev_dispatch.core.task_pool import TaskPriorityPool
 from ev_dispatch.core.vehicle import Vehicle
 from ev_dispatch.core.charging import ChargingStation
 
@@ -42,6 +43,9 @@ class SimulationState:
         self.charging_stations = charging_stations
         self.network = network
         self.extra_info = extra_info or {}
+
+    def task_pool(self, policy: str = "deadline") -> TaskPriorityPool:
+        return TaskPriorityPool(self.pending_tasks, policy=policy)
 
 
 @dataclass

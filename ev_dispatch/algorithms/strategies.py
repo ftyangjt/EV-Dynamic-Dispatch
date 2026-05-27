@@ -69,7 +69,7 @@ class DispatcherNearestFirst(Dispatcher):
             best_metric = float("inf")
             for s in state.charging_stations:
                 d = state.network.shortest_distance(vehicle.position, s.position)
-                metric = d + (s.get_wait_time() / 60.0)
+                metric = d + (s.get_wait_time(state.current_time) / 60.0)
                 if metric < best_metric:
                     best_metric = metric
                     best = s
@@ -89,7 +89,7 @@ class DispatcherNearestFirst(Dispatcher):
                 continue
 
             can_finish_one_and_reach_station = False
-            for t in state.pending_tasks:
+            for t in state.task_pool("deadline"):
                 dist_to_pick = state.network.shortest_distance(v.position, t.origin)
                 dist_delivery = state.network.shortest_distance(t.origin, t.destination)
                 dist_to_station = state.network.shortest_distance(t.destination, st.position)
@@ -114,7 +114,7 @@ class DispatcherNearestFirst(Dispatcher):
                 actions.append(Action(type="go_charge", vehicle_id=v.id, station_id=st.id, note="cannot_reach_station_after_task"))
                 vehicles_to_charge.add(v.id)
 
-        unassigned_tasks = list(state.pending_tasks)
+        unassigned_tasks = state.task_pool("deadline")
         planned_loads = {v.id: v.current_load for v in state.vehicles}
         planned_volumes = {v.id: v.current_volume for v in state.vehicles}
         available_vehicles = [
@@ -133,7 +133,7 @@ class DispatcherNearestFirst(Dispatcher):
             best_distance = float("inf")
 
             for vehicle in available_vehicles:
-                for task in unassigned_tasks:
+                for task in unassigned_tasks.ordered_tasks():
                     estimate = estimate_task_assignment(
                         network=state.network,
                         vehicle=vehicle,
@@ -158,7 +158,7 @@ class DispatcherNearestFirst(Dispatcher):
                     note="nearest_first",
                 )
             )
-            unassigned_tasks.remove(task)
+            unassigned_tasks.remove(task.id)
             planned_loads[vehicle.id] += task.weight
             planned_volumes[vehicle.id] += task.volume
             available_vehicles.remove(vehicle)
@@ -179,7 +179,7 @@ class DispatcherLargestFirst(Dispatcher):
             best_metric = float("inf")
             for s in state.charging_stations:
                 d = state.network.shortest_distance(vehicle.position, s.position)
-                metric = d + (s.get_wait_time() / 60.0)
+                metric = d + (s.get_wait_time(state.current_time) / 60.0)
                 if metric < best_metric:
                     best_metric = metric
                     best = s
@@ -198,7 +198,7 @@ class DispatcherLargestFirst(Dispatcher):
                 continue
 
             can_finish_one_and_reach_station = False
-            for t in state.pending_tasks:
+            for t in state.task_pool("deadline"):
                 dist_to_pick = state.network.shortest_distance(v.position, t.origin)
                 dist_delivery = state.network.shortest_distance(t.origin, t.destination)
                 dist_to_station = state.network.shortest_distance(t.destination, st.position)
@@ -225,9 +225,12 @@ class DispatcherLargestFirst(Dispatcher):
 
         planned_loads = {v.id: v.current_load for v in state.vehicles}
         planned_volumes = {v.id: v.current_volume for v in state.vehicles}
-        sorted_tasks = sorted(state.pending_tasks, key=lambda t: t.weight, reverse=True)
+        task_pool = state.task_pool("weight")
 
-        for task in sorted_tasks:
+        while task_pool:
+            task = task_pool.pop()
+            if task is None:
+                break
             best_vehicle = None
             best_distance = float("inf")
 
@@ -257,7 +260,6 @@ class DispatcherLargestFirst(Dispatcher):
                 )
                 planned_loads[best_vehicle.id] += task.weight
                 planned_volumes[best_vehicle.id] += task.volume
-                sorted_tasks = [t for t in sorted_tasks if t.id != task.id]
                 vehicles_to_charge.add(best_vehicle.id)
 
         return actions
@@ -287,7 +289,7 @@ class DispatcherCompositeScore(Dispatcher):
         best_metric = float("inf")
         for station in state.charging_stations:
             distance = state.network.shortest_distance(vehicle.position, station.position)
-            metric = distance + station.get_wait_time() / 60.0
+            metric = distance + station.get_wait_time(state.current_time) / 60.0
             if metric < best_metric:
                 best_metric = metric
                 best_station = station
@@ -363,7 +365,7 @@ class DispatcherCompositeScore(Dispatcher):
                 )
                 vehicles_to_charge.add(vehicle.id)
 
-        unassigned_tasks = list(state.pending_tasks)
+        unassigned_tasks = state.task_pool("priority_deadline")
         planned_loads = {v.id: v.current_load for v in state.vehicles}
         planned_volumes = {v.id: v.current_volume for v in state.vehicles}
         available_vehicles = [
@@ -375,9 +377,10 @@ class DispatcherCompositeScore(Dispatcher):
         while unassigned_tasks and available_vehicles:
             best_assignment = None
             best_score = float("-inf")
+            candidate_tasks = unassigned_tasks.ordered_tasks()
 
             for vehicle in available_vehicles:
-                for task in unassigned_tasks:
+                for task in candidate_tasks:
                     estimate = self._estimate_assignment(
                         state=state,
                         vehicle=vehicle,
@@ -404,7 +407,7 @@ class DispatcherCompositeScore(Dispatcher):
                     note=f"composite_{self.config.name}",
                 )
             )
-            unassigned_tasks.remove(task)
+            unassigned_tasks.remove(task.id)
             planned_loads[vehicle.id] += task.weight
             planned_volumes[vehicle.id] += task.volume
             available_vehicles.remove(vehicle)

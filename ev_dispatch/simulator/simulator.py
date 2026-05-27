@@ -100,6 +100,8 @@ class Simulator:
         for vehicle in self.vehicles:
             if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
                 continue
+            if vehicle.charge_destination_station_id is not None:
+                continue
             if vehicle.available_at is None or vehicle.available_at > now:
                 continue
 
@@ -218,6 +220,19 @@ class Simulator:
     def _vehicle_display_position(self, vehicle: Vehicle, display_time: Optional[datetime] = None) -> tuple:
         if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
             return (vehicle.position.x, vehicle.position.y)
+        now = display_time or self.current_time
+
+        if vehicle.charge_destination_station_id:
+            _phase, route, route_progress, _route_length = self._vehicle_phase_route_progress(vehicle, now)
+            route_locations = [
+                Location(float(point["x"]), float(point["y"]), str(point.get("name") or ""))
+                for point in route
+                if point is not None
+            ]
+            if route_locations:
+                return self._path_position_at_distance(route_locations, route_progress)
+            return (vehicle.position.x, vehicle.position.y)
+
         if not vehicle.current_tasks:
             return (vehicle.position.x, vehicle.position.y)
 
@@ -230,7 +245,6 @@ class Simulator:
         ):
             return (vehicle.position.x, vehicle.position.y)
 
-        now = display_time or self.current_time
         _phase, route, route_progress, _route_length = self._vehicle_phase_route_progress(vehicle, now)
         route_locations = [
             Location(float(point["x"]), float(point["y"]), str(point.get("name") or ""))
@@ -315,6 +329,39 @@ class Simulator:
     def _vehicle_phase_route_progress(self, vehicle: Vehicle, display_time: datetime) -> tuple:
         if vehicle.status == VehicleStatus.CHARGING:
             return "charging", [], 0.0, 0.0
+        if vehicle.charge_destination_station_id:
+            route_locations = vehicle.charge_route_path or []
+            if not route_locations:
+                route_locations = [
+                    loc
+                    for loc in (vehicle.charge_route_start_position, vehicle.position)
+                    if loc is not None
+                ]
+            route = self._path_snapshot(route_locations)
+            route_length = (
+                float(vehicle.charge_route_distance)
+                if vehicle.charge_route_distance > 0
+                else self._path_length(route_locations)
+            )
+            if (
+                vehicle.charge_route_start_time is None
+                or vehicle.charge_arrival_time is None
+                or display_time <= vehicle.charge_route_start_time
+            ):
+                return "to_charge", route, 0.0, route_length
+            if display_time >= vehicle.charge_arrival_time:
+                return "to_charge", route, route_length, route_length
+
+            elapsed = (display_time - vehicle.charge_route_start_time).total_seconds() / 3600.0
+            if vehicle.charge_timed_path:
+                progress = self._timed_path_progress(vehicle.charge_timed_path, elapsed)
+            else:
+                duration_hours = max(
+                    1e-9,
+                    (vehicle.charge_arrival_time - vehicle.charge_route_start_time).total_seconds() / 3600.0,
+                )
+                progress = route_length * max(0.0, min(1.0, elapsed / duration_hours))
+            return "to_charge", route, min(progress, route_length), route_length
         if vehicle.status not in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED) or not vehicle.current_tasks:
             return "idle", [], 0.0, 0.0
 
@@ -380,6 +427,8 @@ class Simulator:
             "available_at": vehicle.available_at.isoformat() if vehicle.available_at else None,
             "supported_cargo_types": sorted(vehicle.supported_cargo_types),
             "charging_station_id": vehicle.charging_station_id,
+            "charge_destination_station_id": vehicle.charge_destination_station_id,
+            "charge_arrival_time": vehicle.charge_arrival_time.isoformat() if vehicle.charge_arrival_time else None,
             "charging_duration": float(vehicle.charging_duration),
             "target_battery": float(vehicle.target_battery),
             "route": route,
@@ -556,57 +605,79 @@ class Simulator:
     def _find_station(self, station_id: str) -> Optional[ChargingStation]:
         return next((s for s in self.charging_stations if s.id == station_id), None)
 
-    def _advance_charging_stations(self) -> None:
-        """
-        在当前仿真时刻推进充电站状态：
-        - 结束已充满的车辆
-        - 按 FIFO 从 waiting_queue 拉起新充电（受 num_chargers 限制）
-        """
+    def _advance_charge_routes(self) -> Dict[str, float]:
+        distance_delta = 0.0
+        time_delta_hours = 0.0
         now = self.current_time
 
-        # 1) 完成充电
+        for vehicle in self.vehicles:
+            if (
+                vehicle.status != VehicleStatus.EN_ROUTE
+                or vehicle.charge_destination_station_id is None
+                or vehicle.charge_arrival_time is None
+                or vehicle.charge_arrival_time > now
+            ):
+                continue
+
+            station = self._find_station(vehicle.charge_destination_station_id)
+            if station is None:
+                vehicle.clear_charge_route()
+                vehicle.available_at = None
+                vehicle.status = VehicleStatus.IDLE
+                continue
+
+            vehicle.position = station.position
+            distance_delta += float(vehicle.charge_route_distance)
+            if vehicle.charge_route_start_time is not None:
+                time_delta_hours += (
+                    vehicle.charge_arrival_time - vehicle.charge_route_start_time
+                ).total_seconds() / 3600.0
+            vehicle.clear_charge_route()
+            vehicle.available_at = None
+            vehicle.status = VehicleStatus.IDLE
+            station.enqueue(vehicle.id)
+
+        return {"distance": distance_delta, "time_hours": time_delta_hours, "cost": 0.0, "score": 0.0}
+
+    def _advance_charging_stations(self) -> None:
+        """Advance charging completion and start queued vehicles with heap-backed station state."""
+        now = self.current_time
+
         for station in self.charging_stations:
-            done_ids: List[str] = []
-            for vid, rec in list(station.charging_vehicles.items()):
-                end_time = rec.start_time + timedelta(minutes=float(rec.duration_minutes))
-                if end_time <= now:
-                    done_ids.append(vid)
+            for record in station.complete_due_charging(now):
+                vehicle = next((v for v in self.vehicles if v.id == record.vehicle_id), None)
+                if vehicle is not None and vehicle.status == VehicleStatus.CHARGING:
+                    vehicle.end_charging()
 
-            for vid in done_ids:
-                station.complete_charging(vid, end_time=now)
-                v = next((x for x in self.vehicles if x.id == vid), None)
-                if v is not None and v.status == VehicleStatus.CHARGING:
-                    v.end_charging()
-
-        # 2) 拉起排队车辆开始充电（FIFO）
         for station in self.charging_stations:
             while len(station.charging_vehicles) < station.num_chargers:
-                vid = station.dequeue()
-                if vid is None:
+                vehicle_id = station.dequeue()
+                if vehicle_id is None:
                     break
-                v = next((x for x in self.vehicles if x.id == vid), None)
-                if v is None:
+                vehicle = next((v for v in self.vehicles if v.id == vehicle_id), None)
+                if vehicle is None:
                     continue
-                if v.status in (VehicleStatus.MAINTENANCE, VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
+                if vehicle.status in (VehicleStatus.MAINTENANCE, VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED):
                     continue
 
-                # 充电时长：受“车充电速度”和“站功率上限”共同限制
-                effective_power = min(float(v.charging_speed_kwh_per_hour), float(station.charging_power))
-                energy_needed = max(0.0, float(v.battery_capacity - v.current_battery))
-                duration_minutes = 0.0 if effective_power <= 1e-9 else (energy_needed / effective_power) * 60.0
+                effective_power = min(float(vehicle.charging_speed_kwh_per_hour), float(station.charging_power))
+                energy_needed = max(0.0, float(vehicle.battery_capacity - vehicle.current_battery))
+                duration_minutes = (
+                    0.0
+                    if effective_power <= 1e-9
+                    else (energy_needed / effective_power) * 60.0
+                )
 
-                # 站内记录 + 车辆状态
-                station.start_charging(vehicle_id=vid, target_energy=energy_needed, start_time=now)
-                # 覆盖站内记录的 duration（因为 station.start_charging 默认只用 station.charging_power）
-                if vid in station.charging_vehicles:
-                    station.charging_vehicles[vid].duration_minutes = float(duration_minutes)
+                if not station.start_charging(vehicle_id=vehicle_id, target_energy=energy_needed, start_time=now):
+                    continue
+                station.update_charging_duration(vehicle_id, duration_minutes)
 
-                v.is_charging = True
-                v.charging_station_id = station.id
-                v.charging_start_time = now
-                v.charging_duration = float(duration_minutes)
-                v.target_battery = v.battery_capacity
-                v.status = VehicleStatus.CHARGING
+                vehicle.is_charging = True
+                vehicle.charging_station_id = station.id
+                vehicle.charging_start_time = now
+                vehicle.charging_duration = float(duration_minutes)
+                vehicle.target_battery = vehicle.battery_capacity
+                vehicle.status = VehicleStatus.CHARGING
 
     def _execute_action(
         self,
@@ -629,6 +700,7 @@ class Simulator:
                 return {"distance": 0.0, "score": 0.0, "time_hours": 0.0, "cost": 0.0}
 
             # 先推进站点状态，避免“本步一开始其实有人已充满但未释放”的假排队
+            self._advance_charge_routes()
             self._advance_charging_stations()
 
             depart_time = self.current_time
@@ -655,18 +727,34 @@ class Simulator:
                 weather_factor=station_road_metrics["energy_factor"],
             )
 
-            distance_delta += dist_to_station
-            time_delta_hours += t_to_station
-
             if energy_to_station > vehicle.current_battery:
                 score_delta -= 20  # 电量不足以到达充电站，惩罚
-                return {"distance": distance_delta, "score": score_delta, "time_hours": time_delta_hours, "cost": 0.0}
+                return {"distance": dist_to_station, "score": score_delta, "time_hours": t_to_station, "cost": 0.0}
 
             vehicle.current_battery -= energy_to_station
-            vehicle.position = station.position
-
-            station.enqueue(vehicle.id)
-            self._advance_charging_stations()
+            vehicle.charge_destination_station_id = station.id
+            vehicle.charge_route_start_time = depart_time
+            vehicle.charge_arrival_time = depart_time + timedelta(hours=t_to_station)
+            vehicle.charge_route_start_position = Location(
+                vehicle.position.x,
+                vehicle.position.y,
+                vehicle.position.name,
+            )
+            vehicle.charge_route_path = self.network.shortest_path_locations(
+                vehicle.position,
+                station.position,
+                method="dijkstra",
+            )
+            vehicle.charge_timed_path = self.network.timed_path_locations(
+                vehicle.position,
+                station.position,
+                start_time=depart_time,
+                vehicle_max_speed_kmh=vehicle.max_speed_kmh,
+                method="dijkstra",
+            )
+            vehicle.charge_route_distance = float(dist_to_station)
+            vehicle.available_at = vehicle.charge_arrival_time
+            vehicle.status = VehicleStatus.EN_ROUTE
 
             return {"distance": distance_delta, "score": score_delta, "time_hours": time_delta_hours, "cost": 0.0}
 
@@ -830,6 +918,11 @@ class Simulator:
 
         for step in range(num_steps):
             # 先推进充电队列/完成充电，再生成任务与调度
+            for delta in (self._advance_charge_routes(),):
+                total_distance += delta["distance"]
+                total_time_hours += delta["time_hours"]
+                total_score += delta["score"]
+                total_cost += delta.get("cost", 0.0)
             self._advance_charging_stations()
             for delta in (self._advance_vehicle_tasks(), self._expire_overdue_tasks()):
                 total_distance += delta["distance"]

@@ -181,7 +181,7 @@ def estimate_task_assignment(
             station_after_delivery.position,
             method=method,
         )
-        station_wait_hours = station_after_delivery.get_wait_time() / 60.0
+        station_wait_hours = station_after_delivery.get_wait_time(depart_time) / 60.0
         energy_to_station = EnergyManager.calculate_consumption(
             distance=station_distance_after_delivery,
             load=0.0,

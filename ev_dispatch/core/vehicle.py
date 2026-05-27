@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from ev_dispatch.core.location import Location
 from ev_dispatch.core.network import RoadNetwork
@@ -75,6 +75,13 @@ class Vehicle:
     charging_start_time: Optional[datetime] = None
     charging_duration: float = 0.0  # minutes
     target_battery: float = 100.0
+    charge_destination_station_id: Optional[str] = None
+    charge_route_start_time: Optional[datetime] = None
+    charge_arrival_time: Optional[datetime] = None
+    charge_route_start_position: Optional[Location] = None
+    charge_route_path: List[Location] = field(default_factory=list)
+    charge_timed_path: List[Tuple[Location, float]] = field(default_factory=list)
+    charge_route_distance: float = 0.0
 
     def __post_init__(self) -> None:
         """Initialize runtime defaults from the vehicle type."""
@@ -158,3 +165,12 @@ class Vehicle:
         self.charging_start_time = None
         self.current_battery = self.target_battery
         self.status = VehicleStatus.IDLE
+
+    def clear_charge_route(self) -> None:
+        self.charge_destination_station_id = None
+        self.charge_route_start_time = None
+        self.charge_arrival_time = None
+        self.charge_route_start_position = None
+        self.charge_route_path = []
+        self.charge_timed_path = []
+        self.charge_route_distance = 0.0
