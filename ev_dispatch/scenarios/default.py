@@ -77,12 +77,19 @@ def build_default_scenario(
     num_stations: int = 3,
     vehicle_mix: Dict[str, int] = None,
     random_seed: Optional[int] = None,
+    diagonal_connection_probability: float = 0.3,
 ) -> Tuple[RoadNetwork, List[Vehicle], List[ChargingStation]]:
     """Build a default city dispatch scenario.
     
     所有车辆和充电站必须放在网络节点上！
     """
-    network = RoadNetwork(width=width, height=height, num_nodes=num_nodes, random_seed=random_seed)
+    network = RoadNetwork(
+        width=width,
+        height=height,
+        num_nodes=num_nodes,
+        random_seed=random_seed,
+        diagonal_connection_probability=diagonal_connection_probability,
+    )
 
     if vehicle_mix is None:
         vehicle_mix = {"compact": 1, "standard": 3, "large": 1}

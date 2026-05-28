@@ -208,6 +208,25 @@ python -m ev_dispatch.benchmark --strategies composite,composite:deadline,compos
 
 - [benchmark.py](/c:/Users/lhxsy/OneDrive/EV-Dynamic-Dispatch/ev_dispatch/benchmark.py)
 
+### 自动调优综合策略参数
+
+可以用多随机种子反复评估 `DispatcherCompositeScore` 的权重，搜索平均评分更高的参数组合：
+
+```bash
+python -m ev_dispatch.tune_composite --scales small_city --seeds 42,43,44,45 --trials 40 --steps 12 --tasks-per-step 3 --tag small_tuned
+```
+
+输出文件位于 `outputs/tuning/`：
+
+- `composite_tuning_<tag>.json`
+- `composite_tuning_<tag>.csv`
+
+如果希望参数在不同种子下更稳，可以加入标准差惩罚：
+
+```bash
+python -m ev_dispatch.tune_composite --seeds 42,43,44,45,46 --trials 80 --stdev-penalty 0.2 --tag robust
+```
+
 ## 场景配置
 
 默认提供四档城市规模：

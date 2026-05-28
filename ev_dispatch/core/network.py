@@ -75,6 +75,7 @@ class RoadNetwork:
         num_nodes: int = 25,
         random_seed: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
+        diagonal_connection_probability: float = 0.3,
     ):
         self.width = width
         self.height = height
@@ -109,13 +110,22 @@ class RoadNetwork:
         self._node_ids = [node_id for node_id, _loc in self.nodes]
         self._node_xy = np.array([(loc.x, loc.y) for _node_id, loc in self.nodes], dtype=float)
 
-        for i in range(len(self.nodes)):
-            for j in range(i + 1, len(self.nodes)):
-                node_i, loc_i = self.nodes[i]
-                node_j, loc_j = self.nodes[j]
-                dist = loc_i.distance_to(loc_j)
-                max_grid_dist = max(width, height) / grid_size
-                if dist <= max_grid_dist * 1.1:
+        diagonal_probability = float(np.clip(diagonal_connection_probability, 0.0, 1.0))
+        for i in range(grid_size):
+            for j in range(grid_size):
+                node_i, loc_i = self._grid_node(i, j, grid_size)
+                neighbor_offsets = ((1, 0), (0, 1), (1, 1), (1, -1))
+                for di, dj in neighbor_offsets:
+                    ni = i + di
+                    nj = j + dj
+                    if ni < 0 or ni >= grid_size or nj < 0 or nj >= grid_size:
+                        continue
+                    is_diagonal = abs(di) == 1 and abs(dj) == 1
+                    if is_diagonal and self.rng.random() >= diagonal_probability:
+                        continue
+
+                    node_j, loc_j = self._grid_node(ni, nj, grid_size)
+                    dist = loc_i.distance_to(loc_j)
                     road_type = self._sample_road_type()
                     road_attrs = self._build_road_attributes(road_type, dist)
                     self.graph.add_edge(
@@ -124,6 +134,9 @@ class RoadNetwork:
                         **road_attrs,
                         weight=float(dist),
                     )
+
+    def _grid_node(self, i: int, j: int, grid_size: int) -> Tuple[str, Location]:
+        return self.nodes[i * grid_size + j]
 
     def _sample_road_type(self) -> str:
         return str(self.rng.choice(["arterial", "collector", "local"], p=[0.25, 0.45, 0.30]))
