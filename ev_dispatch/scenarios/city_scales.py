@@ -16,7 +16,7 @@ class CityScaleConfig:
 
     Notes:
     - `tasks_per_step` is tuned to avoid unrealistically overloaded task streams.
-    - One simulation step is one hour in the current simulator.
+    - One simulation step schedules new task arrivals; vehicle and charging updates are event-driven within each hour.
     """
 
     name: CityScaleName

@@ -135,7 +135,7 @@ class Simulator:
         for task in self.all_tasks:
             if task.completed or task.failed or task.assigned_vehicles:
                 continue
-            if task.deadline < self.current_time:
+            if task.deadline <= self.current_time:
                 self._mark_task_failed(task, "deadline_expired")
                 score_delta -= 30.0
         return {"distance": 0.0, "time_hours": 0.0, "cost": 0.0, "score": score_delta}
@@ -679,6 +679,86 @@ class Simulator:
                 vehicle.target_battery = vehicle.battery_capacity
                 vehicle.status = VehicleStatus.CHARGING
 
+    def _next_event_time(self, horizon_time: datetime) -> Optional[datetime]:
+        """Return the next known event time before or at the simulation horizon."""
+        candidates: List[datetime] = []
+
+        for vehicle in self.vehicles:
+            if (
+                vehicle.status in (VehicleStatus.EN_ROUTE, VehicleStatus.OCCUPIED)
+                and vehicle.available_at is not None
+                and self.current_time < vehicle.available_at <= horizon_time
+            ):
+                candidates.append(vehicle.available_at)
+
+        for station in self.charging_stations:
+            for record in station.charging_vehicles.values():
+                finish_time = station._record_finish_time(record)
+                if self.current_time < finish_time <= horizon_time:
+                    candidates.append(finish_time)
+
+        for task in self.all_tasks:
+            if task.completed or task.failed or task.assigned_vehicles:
+                continue
+            if self.current_time < task.deadline <= horizon_time:
+                candidates.append(task.deadline)
+
+        return min(candidates) if candidates else None
+
+    def _advance_due_events(self) -> Dict[str, float]:
+        """Process every event whose timestamp is due at the current simulation time."""
+        total = {"distance": 0.0, "time_hours": 0.0, "cost": 0.0, "score": 0.0}
+
+        while True:
+            before = (
+                len(self._completed_task_ids),
+                len(self._failed_task_ids),
+                sum(len(s.charging_vehicles) for s in self.charging_stations),
+                sum(len(s.waiting_queue) for s in self.charging_stations),
+                tuple((v.id, v.status.value, v.available_at) for v in self.vehicles),
+            )
+
+            for delta in (self._advance_charge_routes(), self._advance_vehicle_tasks(), self._expire_overdue_tasks()):
+                total["distance"] += delta["distance"]
+                total["time_hours"] += delta["time_hours"]
+                total["score"] += delta["score"]
+                total["cost"] += delta.get("cost", 0.0)
+            self._advance_charging_stations()
+
+            after = (
+                len(self._completed_task_ids),
+                len(self._failed_task_ids),
+                sum(len(s.charging_vehicles) for s in self.charging_stations),
+                sum(len(s.waiting_queue) for s in self.charging_stations),
+                tuple((v.id, v.status.value, v.available_at) for v in self.vehicles),
+            )
+            if after == before:
+                break
+
+        return total
+
+    def _pending_tasks(self) -> List[Task]:
+        return [
+            t
+            for t in self.all_tasks
+            if not t.completed and not t.failed and not t.assigned_vehicles
+        ]
+
+    def _append_frame(self, step: int, frame_time: Optional[datetime] = None) -> None:
+        self.frames.append(
+            self._build_frame(
+                step=step,
+                pending_tasks=self._pending_tasks(),
+                frame_time=frame_time or self.current_time,
+            )
+        )
+
+    def _add_delta(self, totals: Dict[str, float], delta: Dict[str, float]) -> None:
+        totals["distance"] += delta["distance"]
+        totals["time_hours"] += delta["time_hours"]
+        totals["score"] += delta["score"]
+        totals["cost"] += delta.get("cost", 0.0)
+
     def _execute_action(
         self,
         action: Action,
@@ -895,7 +975,7 @@ class Simulator:
             "max_station_wait_minutes": max_station_wait_minutes,
         }
 
-    def run_simulation(self, num_steps: int = 100, tasks_per_step: int = 3) -> Dict[str, float]:
+    def _run_simulation_legacy(self, num_steps: int = 100, tasks_per_step: int = 3) -> Dict[str, float]:
         total_distance = 0.0
         total_time_hours = 0.0
         total_score = 0.0
@@ -1011,6 +1091,85 @@ class Simulator:
             total_time_hours=total_time_hours,
             total_cost=total_cost,
             total_score=total_score,
+        )
+
+    def run_simulation(self, num_steps: int = 100, tasks_per_step: int = 3) -> Dict[str, float]:
+        totals = {"distance": 0.0, "time_hours": 0.0, "score": 0.0, "cost": 0.0}
+        total_generated = 0
+        start_time = self.current_time
+
+        self._dbg(
+            "H1",
+            "simulator.py:run_simulation",
+            "event_driven_simulation_start",
+            {
+                "num_steps": num_steps,
+                "tasks_per_step": tasks_per_step,
+                "seed": self.random_seed,
+                "dispatcher": type(self.dispatcher).__name__,
+            },
+        )
+
+        for step in range(num_steps):
+            step_time = start_time + timedelta(hours=step)
+            step_end_time = start_time + timedelta(hours=step + 1)
+            self.current_time = step_time
+            self._add_delta(totals, self._advance_due_events())
+
+            new_tasks = [self.generate_random_task(self.current_time) for _ in range(tasks_per_step)]
+            self.all_tasks.extend(new_tasks)
+            total_generated += len(new_tasks)
+            task_map = {t.id: t for t in self.all_tasks}
+
+            state = SimulationState(
+                current_time=self.current_time,
+                tasks=self.all_tasks,
+                vehicles=self.vehicles,
+                charging_stations=self.charging_stations,
+                network=self.network,
+                extra_info={"step": step},
+            )
+            actions = self.dispatcher.generate_actions(state)
+
+            self._dbg(
+                "H2",
+                "simulator.py:run_simulation",
+                "event_driven_step_actions",
+                {
+                    "step": step,
+                    "generated_tasks": [t.id for t in new_tasks],
+                    "generated_cargo_types": {t.id: t.cargo_type for t in new_tasks},
+                    "pending_task_ids": [t.id for t in state.pending_tasks],
+                    "actions": [
+                        {"type": a.type, "vehicle_id": a.vehicle_id, "task_id": a.task_id, "note": a.note}
+                        for a in actions
+                    ],
+                },
+            )
+
+            for action in actions:
+                self._add_delta(totals, self._execute_action(action, task_map))
+
+            self._append_frame(step)
+
+            while True:
+                next_event_time = self._next_event_time(step_end_time)
+                if next_event_time is None:
+                    break
+                self.current_time = next_event_time
+                self._add_delta(totals, self._advance_due_events())
+                self._append_frame(step)
+
+            self.current_time = step_end_time
+            self._add_delta(totals, self._advance_due_events())
+            self._append_frame(step)
+
+        return self._build_results(
+            total_generated=total_generated,
+            total_distance=totals["distance"],
+            total_time_hours=totals["time_hours"],
+            total_cost=totals["cost"],
+            total_score=totals["score"],
         )
 
     def get_frames(self) -> List[SimulationFrame]:

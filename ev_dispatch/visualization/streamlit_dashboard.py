@@ -105,8 +105,12 @@ def _build_timeline(frames: List[SimulationFrame]) -> Dict[str, List[float]]:
     in_progress: List[int] = []
     avg_battery: List[float] = []
 
-    for frame_index, frame in enumerate(frames):
-        steps.append(frame.step + (frame_index % 5) / 4)
+    base_time = frames[0].current_time if frames else None
+    for frame in frames:
+        if base_time is None:
+            steps.append(float(frame.step))
+        else:
+            steps.append((frame.current_time - base_time).total_seconds() / 3600.0)
         pending.append(len(frame.pending_task_ids))
         completed.append(len(frame.completed_task_ids))
         failed.append(len(frame.failed_task_ids))

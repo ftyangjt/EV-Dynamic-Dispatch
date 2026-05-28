@@ -87,7 +87,7 @@ latest = simulator.get_latest_frame()
 ## 8. 验收清单（每次集成前必须通过）
 1. 运行 python -m ev_dispatch.main 无异常退出。
 2. 至少一个策略可返回非空动作列表。
-3. 仿真结束后 get_frames() 长度等于 num_steps。
+3. 仿真结束后 get_frames() 返回按调度时刻和事件时刻记录的轨迹帧，长度由实际事件数量决定。
 4. 每帧中 vehicle_positions 与 vehicle_battery 键集合一致。
 5. 可视化端可读取最新帧并显示 step、待处理任务数。
 
