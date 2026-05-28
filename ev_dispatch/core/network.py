@@ -419,7 +419,7 @@ class RoadNetwork:
             speed = self._fallback_speed(vehicle_max_speed_kmh)
             return [(start, 0.0), (end, distance / speed)]
 
-        timed_path: List[Tuple[Location, float]] = []
+        timed_path: List[Tuple[Location, float]] = [(start, 0.0)]
         cumulative_hours = 0.0
         for index, node_id in enumerate(node_path):
             loc = self._node_location(node_id)
@@ -435,7 +435,11 @@ class RoadNetwork:
                     vehicle_max_speed_kmh=vehicle_max_speed_kmh,
                 )
                 cumulative_hours += length / max(1e-6, speed)
-            timed_path.append((loc, cumulative_hours))
+            if timed_path[-1][0].distance_to(loc) > 1e-9:
+                timed_path.append((loc, cumulative_hours))
+
+        if timed_path[-1][0].distance_to(end) > 1e-9:
+            timed_path.append((end, cumulative_hours))
 
         return timed_path or [(start, 0.0), (end, 0.0)]
 

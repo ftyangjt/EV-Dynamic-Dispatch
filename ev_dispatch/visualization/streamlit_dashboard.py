@@ -827,7 +827,7 @@ def _render_game_scene(payload: Dict[str, object], autoplay: bool, fps: int, foc
         if (!Number.isFinite(raw.x) || !Number.isFinite(raw.y)) continue;
         const next = nextById.get(raw.id);
         const routeMove = isPlaying && next ? routeTarget(raw, next) : null;
-        const v = (isPlaying && next) ? next : raw;
+        const v = routeMove ? raw : ((isPlaying && next) ? next : raw);
         const targetLoc = routeMove && routeMove.point ? routeMove.point : v;
         const target = pt(targetLoc, sc);
         const color = vehicleColors[v.status] || "#38bdf8";

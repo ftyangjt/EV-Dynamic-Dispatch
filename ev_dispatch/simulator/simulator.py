@@ -330,7 +330,9 @@ class Simulator:
         if vehicle.status == VehicleStatus.CHARGING:
             return "charging", [], 0.0, 0.0
         if vehicle.charge_destination_station_id:
-            route_locations = vehicle.charge_route_path or []
+            route_locations = [loc for loc, _hours in vehicle.charge_timed_path] if vehicle.charge_timed_path else []
+            if not route_locations:
+                route_locations = vehicle.charge_route_path or []
             if not route_locations:
                 route_locations = [
                     loc
@@ -338,11 +340,9 @@ class Simulator:
                     if loc is not None
                 ]
             route = self._path_snapshot(route_locations)
-            route_length = (
-                float(vehicle.charge_route_distance)
-                if vehicle.charge_route_distance > 0
-                else self._path_length(route_locations)
-            )
+            route_length = self._path_length(route_locations)
+            if route_length <= 1e-9 and vehicle.charge_route_distance > 0:
+                route_length = float(vehicle.charge_route_distance)
             if (
                 vehicle.charge_route_start_time is None
                 or vehicle.charge_arrival_time is None
@@ -375,8 +375,16 @@ class Simulator:
             return vehicle.status.value, [], 0.0, 0.0
 
         pickup_time = task.planned_pickup_time or task.start_transport_time
-        pickup_path = task.pickup_path or [task.transport_start_position, task.origin]
-        delivery_path = task.delivery_path or [task.origin, task.destination]
+        pickup_path = (
+            [loc for loc, _hours in task.pickup_timed_path]
+            if task.pickup_timed_path
+            else task.pickup_path or [task.transport_start_position, task.origin]
+        )
+        delivery_path = (
+            [loc for loc, _hours in task.delivery_timed_path]
+            if task.delivery_timed_path
+            else task.delivery_path or [task.origin, task.destination]
+        )
         full_route_locations = self._combine_paths(pickup_path, delivery_path)
         full_route = self._path_snapshot(full_route_locations)
         route_length = self._path_length(full_route_locations)
