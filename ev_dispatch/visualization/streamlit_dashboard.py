@@ -662,7 +662,12 @@ def _render_game_scene(payload: Dict[str, object], autoplay: bool, fps: int, foc
       if (!Array.isArray(route) || route.length < 2) return null;
 
       let startProgress = Number(current.route_progress);
-      const endProgress = Number(next.route_progress);
+      let endProgress = Number(next.route_progress);
+      const nextRoute = Array.isArray(next.route) ? next.route : [];
+      if ((!Number.isFinite(endProgress) || (nextRoute.length < 2 && endProgress <= startProgress + 1e-6))
+          && Number.isFinite(Number(current.route_length))) {{
+        endProgress = Number(current.route_length);
+      }}
       if (!Number.isFinite(endProgress)) return null;
       if (!sameRoute(route, current.route || [])) {{
         const projected = closestRouteProgress(route, current);

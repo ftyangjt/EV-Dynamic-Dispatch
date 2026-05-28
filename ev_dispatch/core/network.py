@@ -387,8 +387,14 @@ class RoadNetwork:
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return [start, end]
 
-        locations = [self._node_location(node_id) for node_id in node_path]
-        return [loc for loc in locations if loc is not None] or [start, end]
+        locations = [loc for loc in (self._node_location(node_id) for node_id in node_path) if loc is not None]
+        path = [start]
+        for loc in locations:
+            if path[-1].distance_to(loc) > 1e-9:
+                path.append(loc)
+        if path[-1].distance_to(end) > 1e-9:
+            path.append(end)
+        return path or [start, end]
 
     def timed_path_locations(
         self,

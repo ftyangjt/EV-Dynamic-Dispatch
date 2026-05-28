@@ -761,6 +761,21 @@ class Simulator:
             )
         )
 
+    def _append_event_segment_frames(
+        self,
+        step: int,
+        start_time: datetime,
+        end_time: datetime,
+        max_interval_minutes: float = 15.0,
+    ) -> None:
+        if end_time <= start_time:
+            return
+        total_minutes = (end_time - start_time).total_seconds() / 60.0
+        segments = int(np.ceil(total_minutes / max(1e-6, max_interval_minutes)))
+        for index in range(1, max(1, segments)):
+            frame_time = start_time + (end_time - start_time) * (index / segments)
+            self._append_frame(step, frame_time=frame_time)
+
     def _add_delta(self, totals: Dict[str, float], delta: Dict[str, float]) -> None:
         totals["distance"] += delta["distance"]
         totals["time_hours"] += delta["time_hours"]
@@ -1164,10 +1179,12 @@ class Simulator:
                 next_event_time = self._next_event_time(step_end_time)
                 if next_event_time is None:
                     break
+                self._append_event_segment_frames(step, self.current_time, next_event_time)
                 self.current_time = next_event_time
                 self._add_delta(totals, self._advance_due_events())
                 self._append_frame(step)
 
+            self._append_event_segment_frames(step, self.current_time, step_end_time)
             self.current_time = step_end_time
             self._add_delta(totals, self._advance_due_events())
             self._append_frame(step)
