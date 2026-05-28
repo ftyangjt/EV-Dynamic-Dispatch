@@ -159,9 +159,6 @@ def _build_road_rows(network: object, current_time) -> List[Dict[str, object]]:
                 "限速(km/h)": round(float(attrs.get("speed_limit_kmph", 0.0)), 1),
                 "当前有效速度": round(float(speed), 1),
                 "路面质量": round(float(attrs.get("surface_quality", 0.0)), 2),
-                "事故风险": round(float(attrs.get("accident_risk", 0.0)), 2),
-                "收费/公里": round(float(attrs.get("toll_per_km", 0.0)), 2),
-                "货车限制": "是" if attrs.get("truck_restriction", False) else "否",
                 "x1": round(float(node_xy[n1].x), 2),
                 "y1": round(float(node_xy[n1].y), 2),
                 "x2": round(float(node_xy[n2].x), 2),
@@ -194,8 +191,6 @@ def _build_scene_payload(
                 "lane_count": int(attrs.get("lane_count", 1)),
                 "speed_limit_kmph": float(attrs.get("speed_limit_kmph", 0.0)),
                 "surface_quality": float(attrs.get("surface_quality", 0.0)),
-                "accident_risk": float(attrs.get("accident_risk", 0.0)),
-                "truck_restriction": bool(attrs.get("truck_restriction", False)),
             }
         )
 
@@ -727,8 +722,7 @@ def _render_game_scene(payload: Dict[str, object], autoplay: bool, fps: int, foc
         if (!a || !b) continue;
         const p1 = pt(a, sc);
         const p2 = pt(b, sc);
-        const restricted = e.truck_restriction;
-        ctx.strokeStyle = selectedId === e.id ? "#f8fafc" : (restricted ? "#dc2626" : (roadColors[e.road_type] || "#64748b"));
+        ctx.strokeStyle = selectedId === e.id ? "#f8fafc" : (roadColors[e.road_type] || "#64748b");
         ctx.globalAlpha = selectedId === e.id ? 0.95 : 0.62;
         ctx.lineWidth = (e.lane_count || 1) * (selectedId === e.id ? 1.9 : 1.15);
         ctx.beginPath();
@@ -1004,8 +998,6 @@ def _render_game_scene(payload: Dict[str, object], autoplay: bool, fps: int, foc
           <span>车道</span><span>${{data.lane_count}}</span>
           <span>限速</span><span>${{(data.speed_limit_kmph || 0).toFixed(1)}} km/h</span>
           <span>路面质量</span><span>${{(data.surface_quality || 0).toFixed(2)}}</span>
-          <span>事故风险</span><span>${{(data.accident_risk || 0).toFixed(2)}}</span>
-          <span>货车限制</span><span>${{data.truck_restriction ? "是" : "否"}}</span>
         </div>`;
       return '<div class="muted">尚未选中对象。</div>';
     }}

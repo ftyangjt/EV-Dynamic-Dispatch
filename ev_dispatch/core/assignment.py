@@ -70,18 +70,8 @@ def _transport_cost(
     distance_cost = total_distance * base_cost_per_km
     weight_cost = total_distance * task_weight * weight_cost_per_kg_km
     energy_cost = energy_used * energy_cost_per_kwh
-    road_cost = (
-        pickup_road_metrics["toll_cost"]
-        + delivery_road_metrics["toll_cost"]
-        + pickup_road_metrics["risk_cost"]
-        + delivery_road_metrics["risk_cost"]
-    )
-    restriction_penalty = (
-        pickup_road_metrics["restricted_distance_km"]
-        + delivery_road_metrics["restricted_distance_km"]
-    ) * 2.0
     return float(
-        (distance_cost + weight_cost + energy_cost + road_cost + restriction_penalty)
+        (distance_cost + weight_cost + energy_cost)
         * _vehicle_cost_multiplier(vehicle)
     )
 

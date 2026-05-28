@@ -37,8 +37,6 @@ def _draw_network(ax: plt.Axes, network: RoadNetwork) -> None:
         x2, y2 = node_xy[n2]
         road_type = attrs.get("road_type", "local")
         color = ROAD_COLORS.get(road_type, "#64748b")
-        if attrs.get("truck_restriction", False):
-            color = "#dc2626"
         ax.plot(
             [x1, x2],
             [y1, y2],

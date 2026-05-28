@@ -49,9 +49,6 @@ class RoadNetwork:
             "lane_max": 4,
             "surface_min": 0.80,
             "surface_max": 0.98,
-            "toll_per_km": 0.12,
-            "risk_min": 0.03,
-            "risk_max": 0.12,
         },
         "collector": {
             "speed_min": 35.0,
@@ -60,9 +57,6 @@ class RoadNetwork:
             "lane_max": 3,
             "surface_min": 0.65,
             "surface_max": 0.92,
-            "toll_per_km": 0.04,
-            "risk_min": 0.08,
-            "risk_max": 0.22,
         },
         "local": {
             "speed_min": 20.0,
@@ -71,9 +65,6 @@ class RoadNetwork:
             "lane_max": 2,
             "surface_min": 0.45,
             "surface_max": 0.82,
-            "toll_per_km": 0.00,
-            "risk_min": 0.16,
-            "risk_max": 0.38,
         },
     }
 
@@ -141,9 +132,7 @@ class RoadNetwork:
         profile = self.ROAD_TYPE_PROFILES[road_type]
         lane_count = int(self.rng.integers(int(profile["lane_min"]), int(profile["lane_max"]) + 1))
         surface_quality = float(self.rng.uniform(profile["surface_min"], profile["surface_max"]))
-        slope_grade = float(self.rng.uniform(-0.04, 0.06))
         intersection_density = float(self.rng.uniform(0.15, 0.90))
-        truck_restriction = bool(self.rng.random() < (0.08 if road_type == "local" else 0.02))
         peak_intensity = float(
             np.clip(
                 self.rng.uniform(0.2, 1.0) * (1.15 if road_type == "arterial" else 0.9),
@@ -158,12 +147,8 @@ class RoadNetwork:
             "lane_count": lane_count,
             "speed_limit_kmph": float(self.rng.uniform(profile["speed_min"], profile["speed_max"])),
             "surface_quality": surface_quality,
-            "slope_grade": slope_grade,
             "intersection_density": intersection_density,
             "peak_intensity": peak_intensity,
-            "toll_per_km": float(profile["toll_per_km"]),
-            "accident_risk": float(self.rng.uniform(profile["risk_min"], profile["risk_max"])),
-            "truck_restriction": truck_restriction,
         }
 
     @staticmethod
@@ -323,9 +308,6 @@ class RoadNetwork:
             "time_hours": distance / speed,
             "avg_speed_kmph": speed,
             "energy_factor": 1.0,
-            "toll_cost": 0.0,
-            "risk_cost": 0.0,
-            "restricted_distance_km": 0.0,
         }
 
     def effective_edge_speed_kmph(
@@ -352,15 +334,11 @@ class RoadNetwork:
 
     def edge_energy_factor(self, attrs: dict) -> float:
         surface_quality = float(attrs.get("surface_quality", 0.75))
-        slope_grade = float(attrs.get("slope_grade", 0.0))
         intersection_density = float(attrs.get("intersection_density", 0.4))
-        accident_risk = float(attrs.get("accident_risk", 0.1))
 
         surface_factor = 1.0 + max(0.0, 0.8 - surface_quality) * 0.35
-        slope_factor = 1.0 + max(0.0, slope_grade) * 3.0 + max(0.0, -slope_grade) * 0.5
         stop_go_factor = 1.0 + max(0.0, min(1.0, intersection_density)) * 0.12
-        risk_factor = 1.0 + max(0.0, min(1.0, accident_risk)) * 0.05
-        return float(surface_factor * slope_factor * stop_go_factor * risk_factor)
+        return float(surface_factor * stop_go_factor)
 
     def dijkstra(self, start: Location, end: Location) -> float:
         """Calculate shortest distance with cached Dijkstra paths."""
@@ -538,9 +516,6 @@ class RoadNetwork:
         total_distance = 0.0
         total_time = 0.0
         weighted_energy_factor = 0.0
-        toll_cost = 0.0
-        risk_cost = 0.0
-        restricted_distance = 0.0
 
         for u, v in zip(node_path, node_path[1:]):
             attrs = self.graph[u][v]
@@ -553,10 +528,6 @@ class RoadNetwork:
             total_distance += length
             total_time += length / max(1e-6, speed)
             weighted_energy_factor += length * self.edge_energy_factor(attrs)
-            toll_cost += length * float(attrs.get("toll_per_km", 0.0))
-            risk_cost += length * float(attrs.get("accident_risk", 0.0)) * 0.25
-            if bool(attrs.get("truck_restriction", False)):
-                restricted_distance += length
 
         avg_speed = total_distance / max(1e-6, total_time)
         metrics = {
@@ -564,9 +535,6 @@ class RoadNetwork:
             "time_hours": float(total_time),
             "avg_speed_kmph": float(avg_speed),
             "energy_factor": float(weighted_energy_factor / max(1e-9, total_distance)),
-            "toll_cost": float(toll_cost),
-            "risk_cost": float(risk_cost),
-            "restricted_distance_km": float(restricted_distance),
         }
         self._road_metrics_cache[cache_key] = dict(metrics)
         self._road_metrics_cache[(end_node, start_node, cache_key[2], method, cache_key[4])] = dict(metrics)
