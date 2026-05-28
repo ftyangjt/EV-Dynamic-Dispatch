@@ -15,6 +15,7 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, _project_root)
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 
 from ev_dispatch.algorithms.strategies import (
@@ -127,6 +128,34 @@ def _build_timeline(frames: List[SimulationFrame]) -> Dict[str, List[float]]:
         "in_progress": in_progress,
         "avg_battery": avg_battery,
     }
+
+
+def _build_chart_frame(runs: Dict[str, Dict[str, object]], series_keys: List[str]) -> pd.DataFrame:
+    series_list: List[pd.Series] = []
+    for name, data in runs.items():
+        label = data.get("label", name)
+        timeline = data["timeline"]
+        index = pd.Index(timeline["step"], name="仿真小时")
+        for key in series_keys:
+            display_name = {
+                "pending": "待处理",
+                "in_progress": "运输中",
+                "completed": "完成",
+                "failed": "失败",
+                "avg_battery": "平均电量",
+            }.get(key, key)
+            column_name = label if len(series_keys) == 1 else f"{label}-{display_name}"
+            series = pd.Series(timeline[key], index=index, name=column_name)
+            series_list.append(series.groupby(level=0).last())
+
+    if not series_list:
+        return pd.DataFrame()
+    chart = pd.concat(series_list, axis=1).sort_index()
+    if series_keys == ["avg_battery"]:
+        chart = chart.interpolate(method="index").ffill().bfill()
+    else:
+        chart = chart.ffill().bfill()
+    return chart.reset_index()
 
 
 def _fmt_time(value: object) -> str:
@@ -1355,23 +1384,16 @@ def main() -> None:
     chart_left, chart_right = st.columns(2)
     with chart_left:
         st.markdown("#### 任务状态趋势")
-        status_series: Dict[str, List[float]] = {}
-        for name, data in runs.items():
-            label = data.get("label", name)
-            timeline = data["timeline"]
-            status_series[f"{label}-待处理"] = timeline["pending"]
-            status_series[f"{label}-运输中"] = timeline["in_progress"]
-            status_series[f"{label}-完成"] = timeline["completed"]
-            status_series[f"{label}-失败"] = timeline["failed"]
-        st.line_chart(status_series)
+        status_chart = _build_chart_frame(
+            runs,
+            ["pending", "in_progress", "completed", "failed"],
+        )
+        st.line_chart(status_chart, x="仿真小时", x_label="仿真小时", y_label="任务数")
 
     with chart_right:
         st.markdown("#### 平均电量趋势")
-        battery_series = {
-            data.get("label", name): data["timeline"]["avg_battery"]
-            for name, data in runs.items()
-        }
-        st.line_chart(battery_series)
+        battery_chart = _build_chart_frame(runs, ["avg_battery"])
+        st.line_chart(battery_chart, x="仿真小时", x_label="仿真小时", y_label="电量(kWh)")
 
     st.subheader("调度动画")
     playback_cols = st.columns([1.2, 1, 1])
