@@ -53,6 +53,24 @@ COMPOSITE_CONFIG_PRESETS = {
         low_battery_ratio_threshold=0.35,
         low_battery_penalty_weight=130.0,
     ),
+    "tuned": CompositeScoreConfig(
+        name="tuned",
+        base_reward=120.0,
+        priority_weight=15.0,
+        urgency_weight=24.8888,
+        urgency_floor_hours=1.51409,
+        load_fit_weight=9.10928,
+        pickup_distance_weight=4.0,
+        delivery_distance_weight=0.878372,
+        travel_time_weight=12.5993,
+        energy_weight=1.53703,
+        lateness_weight=30.8163,
+        station_wait_weight=5.95514,
+        station_distance_weight=0.484857,
+        low_battery_ratio_threshold=0.287597,
+        low_battery_penalty_weight=103.097,
+        reserve_energy_kwh=15.1639,
+    ),
 }
 
 
