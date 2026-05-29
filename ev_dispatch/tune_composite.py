@@ -142,8 +142,9 @@ def _initial_configs() -> List[CompositeScoreConfig]:
     return [COMPOSITE_CONFIG_PRESETS[name] for name in ("balanced", "deadline", "cost", "energy")]
 
 
-def _objective(summary: Dict[str, object], stdev_penalty: float) -> float:
-    return float(summary["mean_score"]) - float(stdev_penalty) * float(summary["stdev_score"])
+def _objective(summary: Dict[str, object]) -> float:
+    """Optimize only the final benchmark score averaged across runs."""
+    return float(summary["mean_score"])
 
 
 def tune(
@@ -154,7 +155,6 @@ def tune(
     num_steps: int = None,
     tasks_per_step: int = None,
     start_time=DEFAULT_SIMULATION_START_TIME,
-    stdev_penalty: float = 0.0,
 ) -> Dict[str, object]:
     rng = np.random.default_rng(int(optimizer_seed))
     history: List[Dict[str, object]] = []
@@ -184,7 +184,7 @@ def tune(
             tasks_per_step=tasks_per_step,
             start_time=start_time,
         )
-        objective = _objective(summary, stdev_penalty=stdev_penalty)
+        objective = _objective(summary)
         record = {
             "trial": trial_index,
             "config_name": candidate.name,
@@ -224,7 +224,7 @@ def tune(
         "optimizer_seed": int(optimizer_seed),
         "num_steps": num_steps,
         "tasks_per_step": tasks_per_step,
-        "stdev_penalty": float(stdev_penalty),
+        "objective_metric": "mean_total_score",
         "best_objective": best_objective,
         "best_config": asdict(best_config) if best_config is not None else {},
         "best_summary": {
@@ -294,12 +294,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SIMULATION_START_TIME.isoformat(timespec="seconds"),
         help="Simulation start time in ISO format, e.g. 2026-01-01T08:00:00.",
     )
-    parser.add_argument(
-        "--stdev-penalty",
-        type=float,
-        default=0.0,
-        help="Subtract this multiplier times score stdev from mean score for robust tuning.",
-    )
     parser.add_argument("--output-dir", default="outputs/tuning", help="Directory for tuning outputs.")
     parser.add_argument("--tag", default="latest", help="Output file tag.")
     return parser.parse_args()
@@ -323,7 +317,6 @@ def main() -> None:
         num_steps=args.steps,
         tasks_per_step=args.tasks_per_step,
         start_time=start_time,
-        stdev_penalty=args.stdev_penalty,
     )
     json_path, csv_path = write_outputs(args.output_dir, args.tag, payload)
     print_best_config(payload["best_config"])
